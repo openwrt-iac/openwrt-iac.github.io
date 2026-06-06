@@ -1,0 +1,125 @@
+name: publish
+
+# Single workflow that rebuilds the public surface:
+#   /                       static site rendered from web/
+#   /api/openapi.json       pulled from the latest stable uapi release
+#   /feed/                  signed apk feed aggregated from feed.yml sources
+#
+# Triggers: push to main (site or feed-config changed), nightly schedule
+# (catches a source-repo release we didn't notice), and workflow_dispatch
+# (manual refresh after an upstream tag).
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  OPENWRT_VERSION: 25.12.4
+  OPENWRT_SDK_URL: https://downloads.openwrt.org/releases/25.12.4/targets/x86/64/openwrt-sdk-25.12.4-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl zstd
+
+      # The SDK ships the `apk` binary we use to mkndx + sign. Cached so
+      # we don't re-download 150MB on every nightly run.
+      - name: Cache OpenWrt SDK
+        id: sdk_cache
+        uses: actions/cache@v5
+        with:
+          path: build/sdk
+          key: openwrt-sdk-25.12.4-x86_64
+
+      - name: Download SDK if cache miss
+        if: steps.sdk_cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p build/sdk
+          SDK_TARBALL=$(basename "$OPENWRT_SDK_URL")
+          curl -fsSL -o "/tmp/$SDK_TARBALL" "$OPENWRT_SDK_URL"
+          tar --use-compress-program=unzstd -xf "/tmp/$SDK_TARBALL" \
+              -C build/sdk --strip-components=1
+
+      - name: Locate SDK apk binary
+        id: apkbin
+        run: |
+          APK_BIN=$(find build/sdk/staging_dir -type f -executable -name apk | head -1)
+          [ -n "$APK_BIN" ] || { echo "no apk binary in SDK"; exit 1; }
+          echo "path=$(realpath "$APK_BIN")" >> "$GITHUB_OUTPUT"
+
+      - name: Stage gh-pages tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_DIR: /tmp/staging
+          APK_BIN: ${{ steps.apkbin.outputs.path }}
+        run: |
+          set -eu
+          rm -rf /tmp/staging && mkdir -p /tmp/staging
+          chmod +x scripts/*.sh
+
+          # 1. Render the static site (web/ -> /tmp/staging/).
+          ./scripts/render_site.sh
+
+          # 2. Pull the latest stable openapi.json -> /tmp/staging/api/.
+          ./scripts/pull_openapi.sh
+
+          # 3. Aggregate the apk feed. SIGN_KEY is materialised from the
+          # secret here so the script never sees it on its filesystem
+          # path more than necessary.
+          SIGN_KEY=$(mktemp)
+          printf '%s' "${{ secrets.FEED_SIGNING_KEY }}" > "$SIGN_KEY"
+          chmod 600 "$SIGN_KEY"
+          export SIGN_KEY
+          ./scripts/aggregate.sh
+
+          # 4. Also expose the public key file at /feed/uapi-feed.pub.pem
+          # so operators can `curl` it directly off the feed root.
+          mkdir -p /tmp/staging/feed
+          cp keys/uapi-feed.pub.pem /tmp/staging/feed/uapi-feed.pub.pem
+
+          shred -u "$SIGN_KEY" 2>/dev/null || rm -f "$SIGN_KEY"
+
+      - name: Sync staging into gh-pages
+        run: |
+          set -eu
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+
+          git fetch origin gh-pages:gh-pages 2>/dev/null || \
+            git checkout --orphan gh-pages-bootstrap
+          git worktree add /tmp/gh-pages gh-pages 2>/dev/null || \
+            { git checkout --orphan gh-pages && \
+              git rm -rf . >/dev/null 2>&1 || true; \
+              git commit --allow-empty -m "init gh-pages"; \
+              git push origin gh-pages; \
+              git checkout main; \
+              git worktree add /tmp/gh-pages gh-pages; }
+
+          # Wipe the worktree (preserving .git) and replace with staging.
+          find /tmp/gh-pages -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+          ( cd /tmp/staging && tar c . ) | ( cd /tmp/gh-pages && tar x )
+
+          cd /tmp/gh-pages
+          git add -A
+          if git diff --cached --quiet; then
+            echo "(no changes)"
+          else
+            git commit -m "publish: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push origin gh-pages
+          fi

@@ -1,0 +1,15 @@
+# Sources aggregated into the signed apk feed served at
+# https://openwrt-iac.github.io/feed/packages/all/uapi/
+#
+# Each entry names a GitHub repo + a glob matching the APK asset on its
+# latest stable GitHub Release. `gh release list --exclude-pre-releases`
+# filters RC/alpha/beta/pre tags at the source; this feed is stable-only
+# by construction.
+#
+# Add a new package: append a `- repo:`/`asset_pattern:` block.
+
+sources:
+  - repo: openwrt-iac/uapi
+    asset_pattern: 'uapi-*.apk'
+  - repo: openwrt-iac/unbound-uci-ext
+    asset_pattern: 'unbound-uci-ext-*.apk'
