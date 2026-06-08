@@ -2,20 +2,28 @@
 
 This repo holds two things on one `gh-pages` branch:
 
-- the **public site** at <https://openwrt-iac.github.io/> (landing page, install instructions, OpenAPI reference)
-- the **signed apk feed** at <https://openwrt-iac.github.io/feed/packages/all/uapi/packages.adb>, aggregating stable releases from the project's OpenWrt-package repos
+- the **public site** at <https://openwrt-iac.github.io/>: a landing page for the openwrt-iac project (the effort to make OpenWrt as Infrastructure-as-Code-capable as possible) plus a sub-tree per project under it (currently <https://openwrt-iac.github.io/uapi/>).
+- the **signed apk feed** at <https://openwrt-iac.github.io/feed/packages/all/uapi/packages.adb>, aggregating stable releases from every openwrt-iac package repo.
 
 ## Layout (main branch)
 
 ```
-web/              static site source (HTML + CSS)
-keys/             public key file served from the feed
-feed.yml          list of source repos + asset patterns
-scripts/          helpers invoked by the publish workflow
+web/
+  index.html                project landing (openwrt-iac org mission, links to subprojects)
+  style.css                 shared stylesheet for every page on the site
+  uapi/
+    index.html              uapi project landing
+    install/index.html      uapi install + first-token walkthrough
+    api/index.html          Redoc-rendered OpenAPI reference
+keys/                       public key file served from the feed
+feed.yml                    list of source repos + asset patterns
+scripts/                    helpers invoked by the publish workflow
 .github/
   workflows/
-    publish.yml   one workflow that rebuilds gh-pages from all three inputs
+    publish.yml             one workflow that rebuilds gh-pages from all inputs
 ```
+
+Internal HTML links are absolute paths from the site root (`/style.css`, `/uapi/install/`, `/feed/...`) so future page moves don't churn the link graph.
 
 ## Adding a new package to the feed
 
@@ -33,6 +41,8 @@ Requirements on the source repo:
 - Prerelease tags (anything containing a hyphen, e.g. `v1.0.0-rc1`) are marked `--prerelease` on the GitHub Release. The aggregator filters with `gh release list --exclude-pre-releases`; nothing further is required.
 
 After merge, the next nightly run (or a manual `gh workflow run publish.yml --repo openwrt-iac/openwrt-iac.github.io`) picks up the new package's latest stable release and republishes the feed index.
+
+If your new package is substantial enough to warrant a project page (and it usually is, otherwise consider whether it belongs in this org), add a `web/<package>/index.html` mirroring the `web/uapi/` shape and link it from `web/index.html`'s "projects" section.
 
 ## Operator install
 

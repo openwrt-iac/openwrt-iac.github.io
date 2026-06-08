@@ -261,3 +261,40 @@ footer a:hover { color: var(--accent); }
 .topbar .brand::before { content: "$ "; color: var(--fg-dim); }
 .topbar .crumb { color: var(--fg-dim); }
 .topbar nav { margin-left: auto; display: flex; gap: 1.2rem; }
+
+/* ---------- shared additions for the org landing + sub-page crumbs ---------- */
+
+/* Breadcrumb under the brand on sub-pages (uapi/, uapi/install/, uapi/api/). */
+.hero .crumb {
+    font-family: "SFMono-Regular", Menlo, monospace;
+    font-size: 0.9rem;
+    color: var(--fg-dim);
+    margin: -1.5rem 0 1.5rem;
+}
+.hero .crumb a { color: var(--fg-dim); border-bottom: 1px dotted var(--fg-dim); }
+.hero .crumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Longer-form prose paragraphs (used on the org landing's "where we start"
+   section). Slightly wider than .lede; tighter than full-bleed. */
+.prose {
+    max-width: 44rem;
+    margin: 0 0 1.2rem;
+    line-height: 1.65;
+}
+
+/* Bulleted gap list on the org landing. Each <li> opens with a <strong>. */
+.gap-list {
+    max-width: 44rem;
+    padding-left: 1.2rem;
+    margin: 0.6rem 0 1.5rem;
+}
+.gap-list li { margin-bottom: 0.7rem; line-height: 1.55; }
+.gap-list strong { color: var(--fg-bright); }
+
+/* Project-card meta line (small, dimmed links list under each project blurb). */
+.meta {
+    font-size: 0.85rem;
+    color: var(--fg-dim);
+    margin: 0.6rem 0 0;
+}
+.meta a { color: var(--accent); }
