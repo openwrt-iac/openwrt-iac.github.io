@@ -5,13 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Install uapi - signed APK feed</title>
 <meta name="description" content="Install uapi from the signed APK feed for OpenWrt 25.12+.">
-<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <header class="hero">
   <div class="container">
-    <div class="brand"><a href="../" style="color:inherit;border:none;">uapi</a></div>
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> / install</p>
     <h1>Install uapi</h1>
     <p class="lede">
       The signed APK feed for OpenWrt 25.12+. Run these on your router as root.
@@ -41,6 +42,12 @@ apk update</code></pre>
 <pre><code>apk add uapi</code></pre>
       </li>
     </ol>
+    <p class="micro">
+      The same feed serves every package under the openwrt-iac org
+      (currently uapi and unbound-uci-ext). Subsequent
+      <code>apk add &lt;package&gt;</code> calls find them without further
+      setup.
+    </p>
   </div>
 </section>
 
@@ -96,9 +103,10 @@ curl -H "Authorization: Bearer &lt;token&gt;" \
 <footer>
   <div class="container">
     <p>
-      <a href="../">&larr; back to project home</a>
-      - <a href="../api/">API reference</a>
+      <a href="/uapi/">&larr; back to uapi</a>
+      - <a href="/uapi/api/">API reference</a>
       - <a href="https://github.com/openwrt-iac/uapi">github</a>
+      - <a href="/">openwrt-iac home</a>
       - MIT licensed
     </p>
   </div>
