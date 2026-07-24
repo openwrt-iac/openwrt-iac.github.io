@@ -15,3 +15,5 @@ sources:
     asset_pattern: 'unbound-uci-ext-*.apk'
   - repo: openwrt-iac/apply-confirm
     asset_pattern: 'apply-confirm-*.apk'
+  - repo: openwrt-iac/luci-app-uapi
+    asset_pattern: 'luci-app-uapi-*.apk'
