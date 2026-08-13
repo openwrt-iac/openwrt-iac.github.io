@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API versioning policy - uapi 3.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 3.0.0 / API versioning policy</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="api-versioning-policy">API versioning policy</h1>
+<p>The URL prefix <code>/api/v&lt;N&gt;/</code> tracks the wire-contract major: uapi 3.x serves under <code>/api/v3/</code>, a future v4 would mount at <code>/api/v4/</code>. Within a given installed major, additions are backwards-compatible.</p>
+<h2 id="package-version-mirrors-api-major">Package version mirrors API major</h2>
+<p>Package version follows semver, with the major version aligned to the API major:</p>
+<ul>
+<li><strong>MAJOR (<code>(x+1).0.0</code>)</strong>: breaking on-the-wire change. A given uapi installation serves exactly one API major; we do NOT mount <code>/api/v(x+1)/</code> alongside <code>/api/v&lt;x&gt;/</code> in the same binary. Operators who need to keep an old client working keep the previous package version installed (older APKs remain attached to their GitHub Releases at <a href="https://github.com/openwrt-iac/uapi/releases">https://github.com/openwrt-iac/uapi/releases</a>, and the signed git tag is the canonical contract document).</li>
+<li><strong>MINOR (<code>x.(y+1).0</code>)</strong>: backwards-compatible additions only (see below).</li>
+<li><strong>PATCH (<code>x.y.(z+1)</code>)</strong>: bug fixes only. No surface change.</li>
+</ul>
+<p>A client tested against <code>x.y.z</code> works against every future <code>x.y'.z'</code> with <code>y' &gt;= y</code>.</p>
+<h2 id="what-a-major-is-for">What a major is for</h2>
+<p>A major is expensive to <em>have</em>, not to fill. Operators pin a package, clients regenerate,
+the migration document gets written, and the feed carries two lines for a while. That cost
+is paid the moment the major exists and barely moves with how much it contains. So when one
+happens, take everything.</p>
+<p><strong>The objective of a major is to raise quality and remove complexity, and it should break as
+much as it needs to in order to do that.</strong> Not only the changes that are individually
+unavoidable: every compatibility shim, mirrored field name, union type kept for an old
+client, over-declared response, and branch that exists solely to keep a previous contract
+working is eligible, and the default answer is to remove it. Simplification is a sufficient
+reason on its own. A compatibility branch nobody can delete is a permanent tax on every
+future change to the code around it, and a major is the only moment the tax can be repealed.</p>
+<p>Two things follow.</p>
+<p><strong>Minors stay strict, and that is the trade.</strong> Being permissive in a major is what lets a
+minor refuse. The carve-outs above are deliberately narrow and their tests are meant to be
+applied literally; when a change does not qualify, the answer is to queue it for the major
+rather than to widen a carve-out. A rule bent once stops being a rule.</p>
+<p><strong>Queued debt has to be written down or it will not be swept.</strong> Anything deferred with "this
+needs a major" belongs in <code>docs/roadmap.md</code> under the objectives for the next major,
+with enough detail to act on years later. The failure mode is not shipping a breaking change; it is arriving at a
+major, shipping the three items someone remembered, and paying the whole cost again for the
+rest.</p>
+<h2 id="non-breaking-changes-allowed-within-a-major">Non-breaking changes (allowed within a major)</h2>
+<ul>
+<li>New endpoints / resources.</li>
+<li>New optional request fields.</li>
+<li>New response fields. Clients must ignore unknown fields.</li>
+<li>New optional query parameters.</li>
+<li>New error codes. Clients branch on HTTP status and treat unknown <code>code</code> gracefully.</li>
+<li>New scope names.</li>
+<li>Field rename with both old and new accepted during a deprecation window: the old marked <code>deprecated: true</code> in <code>build/openapi.json</code>, an entry added to <code>docs/deprecations.md</code>, and the actual removal scheduled for the next major. The deprecation log is the canonical place the operator-facing migration lives.</li>
+</ul>
+<h2 id="breaking-changes-require-the-next-major">Breaking changes (require the next major)</h2>
+<ul>
+<li>Removing a field that was never deprecated, or removing one ahead of its scheduled <code>docs/deprecations.md</code> removal target.</li>
+<li>Removing or renaming any endpoint or error code. Rename of a request field with a deprecation pair is non-breaking; see above.</li>
+<li>Changing a field's JSON type or semantic meaning.</li>
+</ul>
+<p><strong>Carve-out.</strong> When the declared type could not represent the field's real state, correcting it can ship in a minor with a CHANGELOG entry naming this carve-out, the branch it relies on, and the affected values. Two branches qualify, and each needs evidence rather than an argument.</p>
+<p><strong>(a) No value of it was ever a correct answer.</strong> 2.5.0's <code>system.urandom_seed</code> and <code>lldpd.lldp_description</code>, both typed boolean while holding a filesystem path and free text respectively: <code>true</code> was unreachable as a truthful answer, and every write replaced the operator's value with <code>"1"</code>.</p>
+<p><strong>(b) The server violated its own declared type for a reachable configuration</strong>, so no generated client could rely on the field even though individual reads conformed. 2.5.0's <code>dhcp/hosts.tag</code>, declared <code>["string", "null"]</code> while a section storing <code>list tag</code> returned an array. That is the ordinary uci spelling for more than one tag and what LuCI writes, so the schema was wrong for a configuration operators actually have. A scalar <code>option tag 'red'</code> did read back correctly under the old type, which is exactly why branch (a) does not cover it.</p>
+<p>Branch (b) exists because the original wording of this carve-out was narrower than its own opening clause: it demanded that no value ever be correct, which is a strictly smaller set than "the declared type could not represent the field's real state". <code>tag</code> fell in the gap and shipped anyway, and <a href="https://github.com/openwrt-iac/uapi/issues/126">#126</a> is what surfaced that the rule and the release disagreed.</p>
+<p><strong>A correction under either branch can land silently, so the CHANGELOG entry has to say how loudly it fails.</strong> The type gate rejects a wrong JSON type, but only if the client sends one. A client whose configuration language coerces booleans to strings never does: HCL, most YAML-to-JSON paths with an unquoted <code>true</code>, and shell interpolation all turn <code>true</code> into <code>"true"</code>, which is a valid string and is accepted. 2.5.0's <code>lldp_description</code> takes it and advertises the literal text <code>true</code>; <code>urandom_seed</code> takes it and stays off, because its reader only acts on a value starting with <code>/</code>. Boolean-to-string is the coercion-prone direction. String-to-array is not, which is why <code>dhcp/hosts.tag</code> fails loudly for every client. Say which case the field is in, and if it is the silent one, say what to grep for instead of an error.</p>
+<p>Neither branch covers widening a type for convenience, nor a field where every reachable configuration produced a conforming read. Branch (b) requires naming the uci configuration under which the old server broke its own schema. If you cannot name one, the change waits for the major.
+- Making a previously-optional request field required.
+- Tightening validation to reject previously-accepted payloads. (Carve-out: when the previously-accepted payload produced broken state no caller can rely on, tightening can ship as a patch with an explicit CHANGELOG entry naming the carve-out. 2.2.1's cross-section uniqueness check is the precedent.)</p>
+<h2 id="one-installation-one-api-major">One installation, one API major</h2>
+<p>There is no parallel mount; we don't carry two surface areas in a single binary on resource-constrained hardware. Operators who need to keep a v1 client working keep the v1 package installed (the v1.2.1 APK stays available on the feed; the signed <code>v1.2.1</code> git tag is the canonical v1 contract). The migration table for v1 → v2 lives at <code>docs/migration-v1-to-v2.md</code>.</p>
+<h2 id="raw-stability"><code>/raw/</code> stability</h2>
+<p>URL structure, verbs, auth/scope behavior, and error envelope are v1-stable. Payload shape follows uci, which is OpenWrt's moving target; if OpenWrt changes the <code>firewall</code> package schema, <code>/raw/firewall/...</code> payloads change with it. Documented loudly so users don't expect curated-level stability from raw. See <code>docs/raw.md</code> for the full stability disclaimer.</p>
+<h2 id="openapi-spec-versioning">OpenAPI spec versioning</h2>
+<p>The emitted <code>openapi.json</code> carries the same version as the API it describes (<code>info.version: "2.3.0"</code> for uapi v2.3.0). The spec is the source of truth for what's in the contract at any given release.</p>
+<h2 id="field-annotations">Field annotations</h2>
+<p>Property schemas under <code>components.schemas.*.properties</code> carry two non-standard annotations beyond the OpenAPI baseline shape:</p>
+<ul>
+<li><strong><code>default</code></strong>: the value <code>fromUci</code> synthesizes when the underlying uci option is absent. Standard OpenAPI 3.1 / JSON Schema 2020-12 keyword. The framework does NOT apply this default to incoming requests; it is documentation of the server-side fallback so IaC clients can keep the field sticky (Optional+Computed) instead of mistakenly treating it as caller-owned.</li>
+<li><strong><code>x-uapi-clear-on-omit</code></strong> (vendor extension, boolean): when present and <code>true</code>, the field is caller-owned and clearing it converges. The flag is mutually exclusive with <code>default:</code> (a defaulted-and-clearable field produces perpetual non-converging diffs). Note what the flag does <em>not</em> mean: the server accepts explicit JSON null for any modeled field and clears the underlying uci option, flagged or not, which is what makes a read-modify-write work at all when the read answered null. The flag marks where clearing is <em>safe</em>, not where it is <em>possible</em>, and its value is that a defaulted field is never marked, so a client that treats flagged fields as clearable cannot enter the diff loop above.</li>
+</ul>
+<p>Both annotations are enforced by <code>make lint-defaults</code>. See <code>docs/adding-a-resource.md</code> for the authoring rules.</p>
+<h2 id="what-the-request-and-response-halves-guarantee">What the request and response halves guarantee</h2>
+<p>A generated client can rely on two properties of the split, both enforced by <code>lint-openapi-shape</code>
+rather than left to the generator's habits.</p>
+<p><strong>A <code>&lt;Name&gt;Request</code> exists exactly when the resource can be written.</strong> Read-only endpoints get a
+response schema and no request schema, so a client may treat a missing request half as "not
+writable, or removed". That inference is what makes a removed resource fail codegen loudly
+instead of generating something that no longer exists.</p>
+<p><strong>For a curated resource, the response half contains every field of the request half.</strong> The
+request half is the response's property map minus the response-only entries (<code>runtime</code>,
+<code>managed</code>) and anything marked <code>readOnly</code>, so the containment is structural rather than a
+coincidence of the current field set. A client may therefore derive writability by membership:
+a field present in the response and absent from the request is server-derived, which is how
+<code>network/interfaces.ipaddr</code> reads as computed with no special case.</p>
+<p>The two operation-shaped pairs, <code>BatchRequest</code> and <code>TokenCreateRequest</code>, are hand-written rather
+than generated from a resource module, and are legitimately request-only in places: a token
+create sends scopes and gets back a token. They are outside the rule, and outside the lint.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/versioning.md</code> at tag <code>v3.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/versioning.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concurrency rules for contributors - uapi 3.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 3.0.0 / Concurrency rules for contributors</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="concurrency-rules-for-contributors">Concurrency rules for contributors</h1>
+<p>uapi runs inside <code>uhttpd-mod-ucode</code>'s fork-per-request CGI model. That changes what's safe to write compared to a long-lived process. Read this before adding caches, background work, or "obvious" performance optimizations.</p>
+<p>The model is described in detail in <a href="architecture.html"><code>docs/architecture.md</code></a>; this page is the contributor-facing rules summary.</p>
+<h2 id="the-model-in-one-sentence">The model in one sentence</h2>
+<p>The handler script runs ONCE in the parent uhttpd at startup. Every HTTP request is a forked child that inherits the parent VM via copy-on-write, calls <code>handle_request(env)</code>, and exits.</p>
+<p>Consequences:</p>
+<ul>
+<li>Anything you compute at module top level (constants, loaded resources, parsed tables) lives in the parent VM and is visible to every request via COW.</li>
+<li>Anything you MUTATE at module top level during a request is private to the fork and lost when the fork exits.</li>
+<li>Two concurrent requests run in separate processes. They cannot communicate via in-memory state.</li>
+</ul>
+<h2 id="what-you-can-do-safely">What you can do safely</h2>
+<ul>
+<li><strong>Compute static tables at startup.</strong> <code>RESOURCES</code>, <code>SINGLETONS</code>, <code>KNOWN_PATHS</code>, all the resource module return-objects are built once and treated as read-only.</li>
+<li><strong>Read uci on every request.</strong> uci reads are millisecond-scale and the request volume is low. There is no benefit to caching uci state in memory across requests, and the integration test for the parent-fork model would catch you if you tried.</li>
+<li><strong>Acquire flocks before writing.</strong> Use <code>transaction.transaction()</code> for single-package uci writes; it takes SH on the global lock + EX on the per-package lock. Use <code>transaction.with_lock()</code> for non-uci writes; it takes EX on the global. Use <code>transaction.multi_transaction()</code> for cross-package atomic writes (<code>/batch</code>).</li>
+<li><strong>Use file-backed state for cross-request data.</strong> The token-bucket rate limiter writes to <code>/tmp/uapi-ratelimit/&lt;token&gt;.txt</code>. The idempotency cache writes to <code>/tmp/uapi-idempotency/</code>. File IO + atomic rename + flock is the cross-fork channel.</li>
+</ul>
+<h2 id="what-you-cannot-do">What you cannot do</h2>
+<h3 id="no-module-level-mutable-state-for-caching">No module-level mutable state for caching</h3>
+<pre><code class="language-ucode">let TOKEN_CACHE = null;        // &lt;- DON'T
+function get_tokens() {
+    if (TOKEN_CACHE == null) TOKEN_CACHE = load_tokens();
+    return TOKEN_CACHE;
+}
+</code></pre>
+<p>This compiles. It works on the first request. The cache is private to the fork; the second request gets a fresh <code>null</code> and re-loads. Worse: a token rotation in one fork is invisible to every other fork. Use the file-backed pattern (re-read on each request, atomic-rename to publish updates) instead.</p>
+<h3 id="no-conndefer-for-ubus">No <code>conn.defer()</code> for ubus</h3>
+<p>Use <code>conn.call()</code> only. Async ubus does not buy you any concurrency you don't already have from forking, and the synchronous failure path is easier to reason about. No lint enforces this; it is a code-review rule.</p>
+<h3 id="no-background-work-after-the-response">No "background" work after the response</h3>
+<p>The fork exits as soon as <code>handle_request</code> returns. There is no <code>setTimeout</code>, no thread, no detached task. If you need work to outlive the request, write to a file the next request will pick up, or rely on an external cron/timer.</p>
+<h3 id="no-in-process-pubsub-event-bus">No in-process pubsub / event bus</h3>
+<p>Same reason as the cache: state does not survive <code>fork().exit()</code>.</p>
+<h2 id="lock-layout">Lock layout</h2>
+<p>Two lock files, in three patterns:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Holder</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/var/lock/uapi.lock</code> (SH)</td>
+<td>every uci transaction</td>
+<td>lets multiple uci writes run in parallel ON DIFFERENT PACKAGES, while still serializing against the global EX</td>
+</tr>
+<tr>
+<td><code>/var/lock/uapi.lock</code> (EX)</td>
+<td>non-uci writes (apk, system passwords)</td>
+<td>blocks all uci transactions for the duration of the non-uci op</td>
+</tr>
+<tr>
+<td><code>/var/lock/uapi.pkg.&lt;package&gt;.lock</code> (EX)</td>
+<td>a uci transaction on <code>&lt;package&gt;</code></td>
+<td>serializes writes to the same package; cross-package writes do not collide</td>
+</tr>
+</tbody>
+</table>
+<p>This is the recipe taken by <code>transaction.uc</code>. New write paths should go through one of the three existing entry points (<code>transaction()</code>, <code>multi_transaction()</code>, <code>with_lock()</code>) so the locking is consistent. Direct <code>fs.open</code> + <code>fs.lock</code> in a new code path is a smell; pause and check if you can route through <code>transaction.uc</code> instead.</p>
+<p>Reading uci state acquires no lock. One thing rides along with a GET though: the
+last-used stamp on the presenting token is written through a real <code>uapi</code>-package transaction,
+so roughly one authed request per token per minute does take SH on the global lock plus EX on
+<code>uapi</code>. It is best-effort, and a 423 there is swallowed rather than failing the read.</p>
+<h3 id="423-message-identity">423 message identity</h3>
+<p>On <code>EWOULDBLOCK</code>, the response message names the specific lock under
+contention. The transaction layer reports <code>lock_kind: "package"</code> (the
+common case: another uci writer holds the same package's EX) or
+<code>lock_kind: "global"</code> (a non-uci writer holds EX on
+<code>/var/lock/uapi.lock</code>). The <code>errors.locked()</code> helper branches on this:</p>
+<ul>
+<li><code>Another write transaction holds the per-package lock for 'firewall'</code>:
+  uci-vs-uci contention on the same package.</li>
+<li><code>A non-uci writer holds the global write lock</code>: the global file is
+  contended. Either a <code>with_lock</code> path (apk install/remove,
+  system/password, etc.) holds EX against a uci write, or a <code>with_lock</code>
+  path was itself refused while uci writers held SH; both report
+  <code>lock_kind: "global"</code> and so get this wording.</li>
+</ul>
+<p>The pre-2.0.2 wording ("Another write transaction holds the global
+lock") called every contention "global", which sent operator
+debugging down the wrong path when the actual blocker was on the
+per-package EX. Always pass the <code>info</code> arg when translating
+<code>kind: "locked"</code> results out of <code>transaction.uc</code> so the wording stays
+accurate.</p>
+<h3 id="terraform-parallelism">Terraform parallelism</h3>
+<p>Terraform's default <code>-parallelism=10</code> happily fires 10 concurrent
+creates against the provider. For multi-package fleets that's the
+right thing: 10 writes to 10 distinct uci packages hold compatible SH
+on the global and disjoint EX on their packages, and they run in
+parallel.</p>
+<p>For SAME-package fleets (10 firewall rules, 10 dhcp hosts, etc.), the
+per-package EX serialises them: only one creates at a time, the other
+nine see <code>423 locked</code> and the provider retries with backoff. The
+upper-bound throughput is then the transaction's own latency
+(snapshot + commit + reload + restore-on-failure), not parallelism × N.</p>
+<p>Practical guidance for operators driving large same-package fleets:</p>
+<ul>
+<li>Default to <code>-parallelism=10</code>; the provider's retry-with-backoff
+  absorbs the 423s, and the wall-clock cost of the retries is usually
+  small relative to the transaction itself.</li>
+<li>For really large fleets (&gt;100 same-package writes), drop to
+  <code>-parallelism=1</code> for that resource type via <code>depends_on</code> chains or
+  per-resource <code>lifecycle</code> config. Eliminates the 423 churn entirely.</li>
+<li>Cross-package fleets (mixing firewall + dhcp + network) parallelise
+  cleanly at the default and need no tuning.</li>
+</ul>
+<h2 id="lock-ordering-for-batch">Lock ordering for <code>/batch</code></h2>
+<p><code>multi_transaction</code> acquires per-package EX locks in sorted (lexicographic) order. This is the standard deadlock-avoidance pattern: two batches touching the same set of packages will both acquire in the same order, so one waits for the other, neither holds-and-waits.</p>
+<p>If you add a code path that takes multiple locks at once, follow the same sorted-acquire rule. Don't invent a new ordering.</p>
+<h2 id="test-coverage-for-concurrency-claims">Test coverage for concurrency claims</h2>
+<p>The concurrency model is asserted by integration tests, not just docs:</p>
+<ul>
+<li><code>tests/integration/01_concurrency_model_test.sh</code> confirms fork-per-request (5 concurrent requests; the test asserts at least 2 distinct PIDs, since uhttpd caps concurrent CGI children at 3).</li>
+<li>Lock granularity is asserted at two different levels, and the difference matters when reading a green run. The live half is <code>tests/integration/13_lock_contention_test.sh</code>, which claims "two concurrent writes to the SAME package serialize; the second gets 423 naming the lock" but holds <code>/var/lock/uapi.lock</code> from outside and asserts the global-write-lock wording, so what it proves over HTTP is global contention. The per-package halves are unit tests over real flocks, not HTTP (<code>tests/unit/transaction_test.uc</code>, "per-package lock serializes same-package writes" and "per-package lock allows different packages to proceed in parallel").</li>
+</ul>
+<p>If you change the locking model, run integration tests in QEMU before opening the PR.</p>
+<h2 id="when-in-doubt">When in doubt</h2>
+<p>The fork-per-request property is the constraint that drives most of the otherwise-surprising design choices in uapi (file-backed rate limit, re-read tokens on every request, no in-process subscriber model). When something feels harder than it should be, ask: "would this approach require state to survive <code>fork().exit()</code>?" If yes, that's why.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/concurrency.md</code> at tag <code>v3.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/concurrency.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

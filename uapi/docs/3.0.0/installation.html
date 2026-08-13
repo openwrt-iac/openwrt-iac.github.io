@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation - uapi 3.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 3.0.0 / Installation</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="installation">Installation</h1>
+<h2 id="prerequisites">Prerequisites</h2>
+<p>A router running <strong>OpenWrt 25.12+</strong> (the first apk-based release line). Pulled-in dependencies are all in OpenWrt's <code>base</code> feed: <code>uhttpd</code>, <code>uhttpd-mod-ucode</code>, <code>ucode</code>, the <code>ucode-mod-{ubus,uci,fs,digest,log}</code> mods, and <code>rpcd-mod-iwinfo</code> (for the wireless <code>runtime</code> block). The package's <code>Depends:</code> makes apk resolve them automatically.</p>
+<h2 id="install-from-a-local-apk">Install from a local .apk</h2>
+<p>Get the package onto the router (any way you like: scp, USB stick, sysupgrade overlay), then:</p>
+<pre><code class="language-sh">apk add /path/to/uapi-&lt;version&gt;-r1.apk
+</code></pre>
+<p>The post-install hook will:</p>
+<ol>
+<li>Run <code>/etc/uci-defaults/99-uapi</code> which adds <code>list ucode_prefix '/api/v3=/usr/share/uapi/main.uc'</code> to <code>uhttpd.main</code> and restarts uhttpd.</li>
+<li>Delete itself.</li>
+<li>Print the bootstrap message (first install only; suppressed on upgrade or reinstall).</li>
+</ol>
+<p>Verify:</p>
+<pre><code class="language-sh">curl -k https://localhost/api/v3/healthz
+# { &quot;status&quot;: &quot;ok&quot;, &quot;version&quot;: &quot;&lt;version&gt;&quot;,
+#   &quot;checks&quot;: { &quot;ubus&quot;: &quot;ok&quot;, &quot;uci&quot;: &quot;ok&quot;,
+#               &quot;lock_dir&quot;: &quot;ok&quot;, &quot;time_sync&quot;: &quot;ok&quot; } }
+</code></pre>
+<h2 id="install-from-the-project-feed">Install from the project feed</h2>
+<p>The project hosts an apk feed at <a href="https://openwrt-iac.github.io/feed/">https://openwrt-iac.github.io/feed/</a>. Packages are RSA-4096 signed; the public key is served from the feed root at <a href="https://openwrt-iac.github.io/feed/uapi-feed.pub.pem">https://openwrt-iac.github.io/feed/uapi-feed.pub.pem</a> and the key source of truth lives at <code>openwrt-iac/openwrt-iac.github.io:keys/uapi-feed.pub.pem</code>. The feed aggregates stable releases from every repo under the <code>openwrt-iac</code> org (uapi, unbound-uci-ext, ...), so one <code>apk</code> repositories line installs any of them.</p>
+<pre><code class="language-sh"># Trust the feed's signing key (one-time). uclient-fetch ships with OpenWrt;
+# curl does not, so a stock router cannot run a curl-based instruction.
+uclient-fetch -qO /etc/apk/keys/uapi-feed.pub.pem \
+    https://openwrt-iac.github.io/feed/uapi-feed.pub.pem
+
+# Register the feed
+echo 'https://openwrt-iac.github.io/feed/packages/all/uapi/packages.adb' \
+    &gt; /etc/apk/repositories.d/uapi.list
+
+apk update
+apk add uapi
+</code></pre>
+<p>To move an existing install to a newer release, <code>upgrade</code> rather than <code>add</code>:</p>
+<pre><code class="language-sh">apk update
+apk upgrade uapi
+</code></pre>
+<p><code>apk add uapi</code> does <strong>not</strong> upgrade a package that is already installed. On
+apk-tools 3.0.5, as shipped in OpenWrt 25.12.x, it resolves to the installed
+version, reinstalls it, and reports <code>OK</code>, so an operator who reaches for <code>add</code>
+sees success and no new version and is likely to conclude the feed is stale.
+<code>apk list uapi</code> shows what the feed actually offers, marking a newer one
+<code>upgradable from: &lt;installed&gt;</code>.</p>
+<p>This applies to <code>apk add &lt;name&gt;</code>, resolving from a repository. <code>apk add
+&lt;file.apk&gt;</code>, the local-file form at the top of this page, does upgrade: it
+installs the version in that file whether or not an older one is present.</p>
+<p>The feed carries <strong>stable releases only</strong>. Release candidates (<code>-rc</code>, <code>-alpha</code>, <code>-beta</code>, <code>-pre</code>) are intentionally excluded so that <code>apk add uapi</code> and <code>apk upgrade uapi</code> never resolve to a not-yet-ready build. RC APKs land on the GitHub Release page (marked Pre-release); to install one, download it manually and <code>apk add --allow-untrusted /tmp/uapi-&lt;rc&gt;.apk</code>.</p>
+<p>Every stable release stays available indefinitely, so pinning works: <code>apk add 'uapi&lt;3.0.0'</code> holds a client to the v2 wire contract, and <code>apk add uapi=&lt;version&gt;-r1</code> pins an exact build. <code>CHANGELOG.md</code> and the GitHub Releases page are the sources of truth for what the current line is; this page deliberately does not name it, because a version written here goes stale the moment the next one ships.</p>
+<h2 id="tls">TLS</h2>
+<p>uapi inherits TLS from the <code>main</code> uhttpd instance. By default OpenWrt ships a self-signed certificate (regenerated at first boot via <code>px5g</code>); browsers and curl complain, and over a real network this is <strong>not adequate</strong>. Two well-trodden options on OpenWrt:</p>
+<ul>
+<li><strong><code>acme.sh</code> + <code>luci-app-acme</code></strong>: ACME (Let's Encrypt) on the router itself. Requires the router to be reachable from the internet on port 80 (or DNS-01 challenge support).</li>
+<li><strong>Front the API with a reverse proxy</strong> holding a real certificate (nginx, Caddy, traefik) on a different machine. Useful when the router lives behind double-NAT.</li>
+</ul>
+<h3 id="mutual-tls-client-certificate-auth">Mutual TLS (client certificate auth)</h3>
+<p><code>uhttpd</code> supports verifying client certificates if you set <code>option tls_client_cert_file</code> (path to a CA cert in PEM form) and <code>option tls_require_client_cert '1'</code> on the listener:</p>
+<pre><code class="language-sh">uci set uhttpd.main.tls_client_cert_file='/etc/uapi/clients-ca.pem'
+uci set uhttpd.main.tls_require_client_cert='1'
+uci commit uhttpd
+/etc/init.d/uhttpd restart
+</code></pre>
+<p>After that, every request must present a certificate signed by the CA at <code>/etc/uapi/clients-ca.pem</code>. Combine this with a bearer-token scoped to read-only and you have two-factor service-account auth: the cert proves the caller is approved infrastructure; the token proves what scope it is allowed to exercise. uapi does not look at the client certificate fields itself; uhttpd terminates and validates them.</p>
+<p>uapi enforces TLS by default for any request whose <code>REMOTE_ADDR</code> is not loopback:</p>
+<pre><code>HTTP/1.1 403 Forbidden
+{ &quot;code&quot;: &quot;tls_required&quot;, ... }
+</code></pre>
+<p>To bypass during testing on a closed network, create the marker file:</p>
+<pre><code class="language-sh">touch /etc/uapi.insecure
+</code></pre>
+<p>That <strong>is</strong> a security hole; don't leave it on a production router.</p>
+<h2 id="multiple-uhttpd-instances">Multiple uhttpd instances</h2>
+<p>The package wires only the <code>uhttpd.main</code> instance. If you run additional instances (e.g. a separate admin port), add the prefix manually:</p>
+<pre><code class="language-sh">uci add_list uhttpd.&lt;instance&gt;.ucode_prefix='/api/v3=/usr/share/uapi/main.uc'
+uci commit uhttpd
+/etc/init.d/uhttpd reload
+</code></pre>
+<h2 id="removal">Removal</h2>
+<pre><code class="language-sh">apk del uapi
+</code></pre>
+<p>The pre-remove hook removes the <code>ucode_prefix</code> entry from <code>uhttpd.main</code> and reloads uhttpd. <code>/etc/config/uapi</code> (the token store) is conffile-marked and preserved across removal and upgrades. To wipe tokens: <code>rm /etc/config/uapi</code> after removal.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/installation.md</code> at tag <code>v3.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/installation.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

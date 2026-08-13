@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lock and resource-state audit - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Lock and resource-state audit</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="lock-and-resource-state-audit">Lock and resource-state audit</h1>
+<p>Audit walks every site that holds a system resource (file descriptor, pipe, flock) across <code>src/</code> and <code>cli/</code>. For each, the audit confirms the resource is released on every exit path within a single request: normal return, early return, exception, propagated die.</p>
+<p>ucode has no <code>try/finally</code>; the project uses an explicit pattern across critical paths:</p>
+<pre><code class="language-ucode">let caught = null;
+try { result = fn(); }
+catch (e) { caught = e; }
+release(resource);
+if (caught != null) die(caught);
+</code></pre>
+<p>Reproducing the audit: <code>grep -rn 'fs\.open\|fs\.popen\|\.lock(' src/ cli/</code> yields the canonical list.</p>
+<h2 id="summary">Summary</h2>
+<p><strong>Partial: 17 of the 36 sites the command above finds.</strong> Every site in the table
+below releases correctly on every in-request exit path, and that claim is good. What
+is not good is the coverage: this said "17 sites audited" without qualification until
+2.5.0, while its own reproduction command returned 36. Nine modules appear nowhere in
+the table (<code>error_ring</code>, <code>idempotency</code>, <code>metrics</code>, <code>mgmt</code>, <code>ratelimit</code>, <code>token_store</code>,
+<code>dhcp.leases</code>, <code>dhcp.leases6</code>, <code>dhcp.servers</code>), and roughly seven of the line ranges
+below have drifted from the code they name. <code>mgmt.uc</code> is the illustration: it landed
+in 2.5.0 with an <code>fs.popen</code> and this document went on asserting it had audited
+everything.</p>
+<p>Completing it is tracked in <code>docs/roadmap.md</code> under Hardening. Until then, read this
+as an audit of the transaction and token paths, not of the tree.</p>
+<h2 id="sites">Sites</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Lines</th>
+<th>Resource</th>
+<th>Why it's correct</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/main.uc</code></td>
+<td>65-70</td>
+<td>fd (read VERSION)</td>
+<td>early-return on open fail; close on success</td>
+</tr>
+<tr>
+<td><code>src/main.uc</code></td>
+<td>243-251</td>
+<td>fd (read openapi.json)</td>
+<td>same shape</td>
+</tr>
+<tr>
+<td><code>src/main.uc</code></td>
+<td>259-270</td>
+<td>ubus conn</td>
+<td><code>bus.connect()</code> failure caught; nothing held on error</td>
+</tr>
+<tr>
+<td><code>src/main.uc</code></td>
+<td>289-293</td>
+<td>ubus conn</td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>src/lib/transaction.uc</code></td>
+<td>60-66</td>
+<td>flock acquire</td>
+<td>success returns fd for explicit release; failure closes fd before returning sentinel</td>
+</tr>
+<tr>
+<td><code>src/lib/transaction.uc</code></td>
+<td>69-71</td>
+<td>flock release</td>
+<td>null-safe; unlocks before close</td>
+</tr>
+<tr>
+<td><code>src/lib/transaction.uc</code></td>
+<td>86-96</td>
+<td>per-package 2-level acquire</td>
+<td>releases global on per-package acquire failure</td>
+</tr>
+<tr>
+<td><code>src/lib/transaction.uc</code></td>
+<td>146-176</td>
+<td>lock + transaction</td>
+<td><code>release()</code> called outside try/catch, before <code>die(caught)</code></td>
+</tr>
+<tr>
+<td><code>src/lib/transaction.uc</code></td>
+<td>178-196</td>
+<td>lock + <code>with_lock</code></td>
+<td>same try/release/die shape</td>
+</tr>
+<tr>
+<td><code>src/lib/non_uci.uc</code></td>
+<td>22-48</td>
+<td>delegates to <code>transaction.with_lock</code></td>
+<td>inherits the explicit-release pattern</td>
+</tr>
+<tr>
+<td><code>src/lib/system_access.uc</code></td>
+<td>136-151</td>
+<td>fd (<code>read_keys</code>)</td>
+<td>early-return on open fail; close on success</td>
+</tr>
+<tr>
+<td><code>src/lib/system_access.uc</code></td>
+<td>162-175</td>
+<td>fd (<code>write_keys</code>)</td>
+<td>atomic-rename pattern (see below)</td>
+</tr>
+<tr>
+<td><code>src/lib/ids.uc</code></td>
+<td>22-27</td>
+<td>fd (<code>/dev/urandom</code>)</td>
+<td><code>if (!f) die(...)</code> before deref; close on success</td>
+</tr>
+<tr>
+<td><code>src/lib/packages.uc</code></td>
+<td>9-17</td>
+<td>pipe (<code>apk_exec</code>)</td>
+<td><code>p.close()</code> returns exit code; early-return on popen fail</td>
+</tr>
+<tr>
+<td><code>src/lib/packages.uc</code></td>
+<td>29-32</td>
+<td>pipe (<code>list_installed</code>)</td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>src/lib/packages.uc</code></td>
+<td>feed write</td>
+<td>fd + <code>wx</code> O_EXCL</td>
+<td>TOCTOU re-check on <code>wx</code> miss (fixed in <code>876e483</code>); unconditional close on success</td>
+</tr>
+<tr>
+<td><code>cli/uapi-token</code></td>
+<td>16-24</td>
+<td>fd (<code>/dev/urandom</code>)</td>
+<td>dies on open failure (no fd held); close on success</td>
+</tr>
+</tbody>
+</table>
+<h2 id="tricky-case-system_accessucwrite_keys">Tricky case: <code>system_access.uc::write_keys()</code></h2>
+<pre><code class="language-ucode">let tmp = KEYS_PATH + &quot;.uapi.tmp&quot;;
+try { fs.unlink(tmp); } catch (e) {}
+let f = fs.open(tmp, &quot;w&quot;);
+if (!f) return false;
+try { fs.chmod(tmp, 384); } catch (e) {}  // 0600
+f.write(content);
+f.close();
+</code></pre>
+<p>Three exit paths to verify, in order:</p>
+<ol>
+<li><code>fs.open</code> returns null: early return; no fd held.</li>
+<li><code>fs.chmod</code> throws: caught and discarded; <code>f.write</code> then <code>f.close</code> still run in order on the next two lines; fd released. The chmod tolerance is deliberate (some filesystems return EPERM); content correctness is the priority and the file gets the default umask permissions in that case.</li>
+<li>Normal path: <code>f.write</code> + <code>f.close</code> run unconditionally on the line after the chmod try-catch.</li>
+</ol>
+<p>Subsequent <code>fs.rename(tmp, KEYS_PATH)</code> is also wrapped in try/catch; failure cleans up <code>tmp</code> and returns false. Atomic-rename property is preserved.</p>
+<h2 id="patterns-confirmed">Patterns confirmed</h2>
+<ul>
+<li><strong>fd: open / use / close.</strong> Every <code>fs.open</code> is followed by either an early return (when open returned null) or an unconditional <code>.close()</code> on the success path. No site holds an fd across a return without closing.</li>
+<li><strong>pipe: popen / read / close.</strong> Every <code>fs.popen</code> is followed by <code>.close()</code> (which both releases and yields the child exit code).</li>
+<li><strong>flock: acquire / try-fn / release / die-if-caught.</strong> <code>transaction.uc::transaction()</code> and <code>with_lock()</code> release the lock OUTSIDE the try block, AFTER catch, BEFORE the conditional <code>die(caught)</code>.</li>
+<li><strong>2-level locks.</strong> <code>default_acquire_pkg()</code> releases the global lock if the per-package acquire fails. <code>default_release_pkg()</code> releases in reverse order (per-package, then global).</li>
+</ul>
+<h2 id="the-wireguard-peer-apply">The wireguard peer apply</h2>
+<p><code>wg.uc</code> shells out to <code>wg set</code> after the commit, inside the locked region, to push peer changes to the kernel (see <code>docs/architecture.md</code> § Transaction recipe step 7). Two things about it are load-bearing here.</p>
+<p>The preshared key is staged at a fixed path, <code>/var/run/uapi.wg.psk</code>, rather than a unique one. That is safe only because every uci transaction holds the per-package exclusive lock for <code>network</code>, so two peer applies can never be in flight at once. If that lock discipline ever changes, this needs a unique path. Mode <code>0600</code> is set before the content is written, following the same order as the authorized-keys writer above, and the file is unlinked immediately after the command returns.</p>
+<p><code>wg show &lt;iface&gt; dump</code> is read on the reconcile path only. Its second field is the peer's preshared key, so that output must never be logged or surfaced in an error message.</p>
+<h2 id="scope">Scope</h2>
+<p>This audit is about <strong>logical</strong> resource-state correctness within the lifetime of a single request. The fork-per-request model provides OS-level fd cleanup at fork exit as a backstop, but the audit does not rely on that backstop: every site listed above releases explicitly inside the request.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/lock-state-audit.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/lock-state-audit.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

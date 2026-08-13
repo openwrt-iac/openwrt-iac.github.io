@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uapi deprecations log - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / uapi deprecations log</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="uapi-deprecations-log">uapi deprecations log</h1>
+<p>Canonical list of wire-surface fields that have been deprecated but are still accepted during a deprecation window. Each entry lives here from the release that deprecated it through the release that removes it.</p>
+<p>A field is in the table below if and only if it is currently accepted-but-deprecated. Once removed (in a major release), the entry moves to the "Removed in past releases" section. Contract changes that are not field deprecations, and so cannot be expressed as a table row, are announced under "Announced response-shape changes".</p>
+<p>Policy: a deprecation in a minor release means both forms (old and new) are accepted; the old form is marked <code>deprecated: true</code> in <code>build/openapi.json</code> so codegen tools surface a warning; the removal of the old form happens no sooner than the next major. One exception to the marker, explained under "How to migrate": a field that is not disappearing but losing only its write half cannot say so through that flag, because it has no read/write split.</p>
+<h2 id="active-deprecations">Active deprecations</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Replaced by</th>
+<th>Deprecated since</th>
+<th>Removal target</th>
+<th>Migration</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>network/interfaces.name</code> (request input)</td>
+<td><code>network/interfaces.id</code></td>
+<td>2.2.0</td>
+<td>v3</td>
+<td>Send <code>id</code> instead of <code>name</code> at create time. Both fields accept the same charset (uci section-name rules); on <code>proto=wireguard</code> both are IFNAMSIZ-tight (15 char cap). If both are supplied they must match or the request returns <code>422 conflict</code>. The <code>id</code> field is the universal "section name at create" input across every CRUD resource in 2.2.0; <code>name</code> was a 2.1.0-era shim that only worked on <code>network/interfaces</code>.</td>
+</tr>
+<tr>
+<td><code>network/interfaces.ipaddr</code> (request input)</td>
+<td><code>network/interfaces.ipaddrs</code></td>
+<td>2.5.0 (targeted, not yet released)</td>
+<td>v3</td>
+<td>Send <code>ipaddrs</code> instead. Both name the same uci <code>list ipaddr</code>, and the list already wins on write, so the migration is to stop sending the scalar rather than to change any value. <code>ipaddr</code> stays in responses after removal, carrying the first entry of the list; only the write is going away. See the note below on why this row carries no <code>deprecated: true</code> flag.</td>
+</tr>
+<tr>
+<td><code>dhcp/hosts.mac</code> (request and response)</td>
+<td><code>dhcp/hosts.macs</code></td>
+<td>2.5.0 (targeted, not yet released)</td>
+<td>v3</td>
+<td>Send <code>macs</code> instead, and read it instead. All three names describe one uci <code>list mac</code>: <code>macs</code> is the whole list, <code>mac</code> its first entry and <code>mac_aliases</code> the rest. The list wins on write, so the migration is to stop sending the split rather than to change any value. Unlike <code>network/interfaces.ipaddr</code>, this one does not survive as a read field, which is why it carries the <code>deprecated: true</code> flag: uci has no scalar <code>option mac</code> for a host, so <code>mac</code> was never a uci field at all, only uapi's positional half of a list. There is nothing for it to keep meaning once <code>macs</code> exists.</td>
+</tr>
+<tr>
+<td><code>dhcp/hosts.mac_aliases</code> (request and response)</td>
+<td><code>dhcp/hosts.macs</code></td>
+<td>2.5.0 (targeted, not yet released)</td>
+<td>v3</td>
+<td>Send <code>macs</code> instead, and read it instead. Same single uci <code>list mac</code> as the row above: <code>mac_aliases</code> held every entry after the first, so a client had to concatenate two fields to learn what the reservation actually matched. Flagged <code>deprecated: true</code> for the same reason.</td>
+</tr>
+</tbody>
+</table>
+<p>Every entry above must also appear in the published spec's own description, under
+"Upcoming in v3". That is checked by <code>make lint-doc-refs</code>: the ledger and the spec are
+compared, and a change announced in one but not the other fails the build. The check exists
+because the list-reads-<code>null</code> change was recorded here and in the changelog while appearing
+nowhere in <code>build/openapi.json</code>, so a consumer generating a client got no notice at all of
+the one change most likely to break its response validation. Announcing in a minor is only
+worth doing if the notice reaches the artifact people consume.</p>
+<h2 id="how-to-migrate">How to migrate</h2>
+<p>For each deprecated input field your client sends, switch to the replacement column. uapi accepts both during the window, so the migration can be staged: update writes first, observe nothing breaks, then drop the old field. Reads are unaffected (response shape unchanged during the window).</p>
+<p>The OpenAPI spec at <code>/openapi.json</code> carries <code>deprecated: true</code> on every deprecated request field. Codegen tools that respect that flag (openapi-generator, oapi-codegen, etc.) will emit warnings in the generated client when you regenerate; that's the signal your client has surface area to migrate.</p>
+<p><code>network/interfaces.ipaddr</code> is the exception, and deliberately so. OpenAPI's
+<code>deprecated</code> is a property-level flag with no read/write split, so setting it
+would tell a generator the field is disappearing when in fact it survives as a
+read field and only loses its write half. The v3 spec will say that precisely,
+with <code>readOnly: true</code>. Until then the announcement lives in this table and in
+the field's own <code>description</code>, which is the honest signal available. A client
+that generates separate request and response models should drop <code>ipaddr</code> from
+the request one.</p>
+<h2 id="announced-response-shape-changes">Announced response-shape changes</h2>
+<p>Not field deprecations, so they are not in the table above, but they change the
+contract and are announced here for the same reason: so a client sees them
+before the major that makes them.</p>
+<ul>
+<li>
+<p><strong>List-valued fields will read back <code>null</code> when the uci key is absent, not
+  <code>[]</code></strong> (<a href="https://github.com/openwrt-iac/uapi/issues/39">#39</a>), targeted at v3.
+  uci cannot store an empty list, so <code>[]</code> already means "absent" and
+  distinguishes nothing; <code>null</code> is what that state should be. This is a
+  convention change across every curated resource rather than a per-field one,
+  and it breaks response validation for clients generated against the current
+  <code>{"type": "array"}</code> schema. There is no way to stage it per field without
+  leaving the surface inconsistent, which is why it waits for a major instead of
+  arriving piecemeal.</p>
+</li>
+<li>
+<p><strong><code>dhcp/hosts.tag</code> no longer accepts a space-separated string on write</strong>, targeted at
+  v3. The read half of this has already landed: responses are always an array, including
+  for a section storing <code>option tag 'a b'</code>, which dnsmasq word-splits identically. What
+  remains for v3 is the request side, where a string is still accepted because the 2.4.1
+  spec declared one and clients generated against it send one. One schema serves both
+  directions here, so the type stays <code>["string", "array", "null"]</code> until the major can
+  split them.</p>
+</li>
+</ul>
+<p>This was originally announced the other way round, as a v3 change to the read shape, on
+  the reasoning that normalizing storage would rewrite <code>option tag</code> into <code>list tag</code> the
+  first time a client touched a section. The observation was right and the conclusion did
+  not follow: splitting a stored scalar on the way <em>out</em> settles the read immediately, and
+  a read never touches storage. A write still converges it, measured on hardware:</p>
+<p><code>storage before PUT: dhcp.tgs.tag='guest iot'
+  storage after PUT:  dhcp.tgs.tag='guest' 'iot'</code></p>
+<p>That is acceptable precisely because it is invisible on the wire. dnsmasq compiles both
+  to <code>set:guest,set:iot</code>, and the view round-trips, which is the property that matters.
+  Deferring the read shape cost every client a release of handling two shapes to learn one
+  thing, and bought nothing.</p>
+<ul>
+<li><strong><code>vnstat/interfaces</code> will be removed as an endpoint</strong>, targeted at v3. Use the
+  <code>interfaces</code> array on the <code>vnstat/config</code> singleton, added in 2.5.0.</li>
+</ul>
+<p>The endpoint has never worked. uapi models <code>config interface</code> sections; vnstat's init
+  only ever visits <code>config vnstat</code> sections and reads a <code>list interface</code> inside them
+  (<code>vnstat.init:21,28</code>), so neither the <code>interface</code> nor the <code>enabled</code> option on a
+  <code>config interface</code> section is read by anything. A <code>POST</code> returns 200, writes a section,
+  and vnstat continues tracking exactly what it tracked before. A <code>GET</code> returns <code>[]</code> on a
+  box that is genuinely collecting statistics.</p>
+<p>Seen on a real router, where both shapes are present at once:</p>
+<p><code>vnstat.@vnstat[0].interface='br-lan' 'eth0'      &lt;- tracked
+  vnstat.i_01kvbfpp7f...interface='vlan30'         &lt;- created through uapi, ignored
+  vnstat.i_01kvbfppd8...interface='lan'            &lt;- created through uapi, ignored</code></p>
+<p><strong>The values differ in kind, not just in place.</strong> The dead endpoint accepted uci
+  interface section names (<code>lan</code>); vnstat wants device names as the kernel shows them
+  (<code>br-lan</code>). Migrating is not a copy: <code>lan</code> becomes <code>br-lan</code>. The new field documents this
+  and validates that entries are non-empty strings, which is as far as validation can go
+  without asking the kernel.</p>
+<ul>
+<li><strong>Fields that write a uci option no OpenWrt component reads will be removed</strong>, targeted
+  at v3. Each was modelled against an option name the owning daemon does not consult, so
+  the field has never had any effect: a write is accepted and stored, and the daemon
+  carries on as before. They are removed rather than repointed because, unlike the three
+  corrected in 2.5.0, there is nothing to point them at.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>field</th>
+<th>why there is no target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mwan3/globals.rtmon_interval</code></td>
+<td><code>mwan3rtmon</code> is driven by <code>ip monitor route</code>; there is no polling interval</td>
+</tr>
+<tr>
+<td><code>mwan3/globals.local_source</code></td>
+<td>the live knob is <code>source_routing</code>, a boolean about route-line parsing, not an interface name</td>
+</tr>
+<tr>
+<td><code>vnstat/config.database_dir</code></td>
+<td>a key of <code>/etc/vnstat.conf</code>, which ships from upstream; nothing bridges uci to it</td>
+</tr>
+<tr>
+<td><code>vnstat/config.interface_5min_hours</code></td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>vnstat/config.month_rotate</code></td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>lldpd/config.enable_lldpmed</code></td>
+<td>LLDP-MED is a build-time switch (<code>CONFIG_LLDPD_WITH_LLDPMED</code>)</td>
+</tr>
+<tr>
+<td><code>unbound/server.enabled</code></td>
+<td><code>enabled</code> is read only on <code>config zone</code>; the daemon is enabled through procd</td>
+</tr>
+<tr>
+<td><code>unbound/server.prefetch</code></td>
+<td>the only similar option is <code>prefetch_root</code>, a different feature; unbound's <code>prefetch:</code> directive is derived from <code>recursion</code>, which uapi already exposes</td>
+</tr>
+<tr>
+<td><code>prometheus_node_exporter_lua/config.listen_ipv6</code></td>
+<td>the v6 bind is derived from <code>listen_interface</code></td>
+</tr>
+<tr>
+<td><code>usteer/config.max_assoc_sta</code></td>
+<td>usteer's init forwards a fixed list of uci options to the daemon over ubus and this is not on it; the daemon's own knob is <code>max_assoc</code>, which nothing bridges from uci</td>
+</tr>
+<tr>
+<td>its seventeen collector toggles</td>
+<td>collectors are enumerated from <code>/usr/lib/lua/prometheus-collectors/*.lua</code>; <strong>seven of the seventeen name collectors that do not exist in that package at all</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Requests carrying these keys are ignored today, so nothing on the write side needs
+  migrating. The read side does: each is returned on <code>GET</code> with a <code>default:</code> annotation,
+  which is what an IaC client reads to keep an attribute sticky, and a generated response
+  model for <code>prometheus_node_exporter_lua/config</code> loses eighteen of its properties.</p>
+<ul>
+<li>
+<p><strong><code>managed</code> leaves the request half of every resource schema</strong>, targeted at v3. It is
+  derived from uci's <code>.anonymous</code> flag and no <code>toUci</code> reads it, so a <code>PUT</code> sending
+  <code>managed: false</code> has always answered 200 with <code>managed: true</code>; management state moves
+  only through <code>POST /&lt;resource&gt;/{id}/adopt</code>. 2.5.0 annotates it <code>readOnly</code>, which is the
+  notice: a regenerated client stops putting it in request models. v3 completes the split.</p>
+</li>
+<li>
+<p><strong>Each resource will be described by a separate request schema and response schema</strong>,
+  targeted at v3. One schema serves both directions today, which is why <code>dhcp/hosts.tag</code>
+  keeps <code>string</code> in its type for writers while responses are always an array, why
+  <code>network/interfaces.ipaddr</code> is described in prose rather than as <code>readOnly</code>, and why any
+  read/write asymmetry is unstatable. Generated model names change for every resource.
+  This is the change the <code>ipaddr</code> row above already promises the consequence of.</p>
+</li>
+</ul>
+<h2 id="removed-in-past-releases">Removed in past releases</h2>
+<p>(none yet; uapi has not cut a v3.)</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/deprecations.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/deprecations.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

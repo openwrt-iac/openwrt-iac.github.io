@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building the uapi APK - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Building the uapi APK</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="building-the-uapi-apk">Building the uapi APK</h1>
+<p>The version comes from a single source: the <code>VERSION</code> file at the repo root (semver, e.g. <code>1.0.0-rc1</code>). The OpenWrt Makefile translates that to apk-style <code>PKG_VERSION</code> (hyphens become underscores), and <code>make stage</code> ships a copy to <code>/usr/share/uapi/VERSION</code> so <code>main.uc</code> and <code>/healthz</code> report the same string.</p>
+<p>This document walks through producing <code>uapi-&lt;version&gt;-r1.apk</code> for OpenWrt 25.12.5 using the official OpenWrt SDK. Substitute the actual version from the <code>VERSION</code> file (or the release page) wherever you see <code>&lt;version&gt;</code> below.</p>
+<h2 id="package-contract">Package contract</h2>
+<p><strong>No daemon of our own.</strong> The package's job is (a) drop files, (b) wire our handler into uhttpd's config, (c) clean up that wiring on removal. There is no <code>uapi</code> process, no <code>procd</code> service definition, no init script.</p>
+<p><strong>Wires only to the <code>main</code> uhttpd instance.</strong> Operators running multiple uhttpd instances who want the API on another instance configure it manually (the post-install message points at this).</p>
+<p><strong>No conflicts.</strong> Coexists with rpcd, LuCI, and anything else hosted on uhttpd.</p>
+<p><strong>No default token shipped.</strong> Operators mint the first token via <code>uapi-token create</code> after install. Shipping a default would be a security hole.</p>
+<p><strong>Distribution.</strong> v1 launch ships on the project-owned OpenWrt feed at <code>openwrt-iac.github.io/feed/</code>. Submission to the official <code>packages</code> feed is a later step, not a blocker.</p>
+<h2 id="what-gets-installed">What gets installed</h2>
+<pre><code>/usr/share/uapi/main.uc                  uhttpd ucode-prefix entry point
+/usr/share/uapi/raw.uc                   generic /raw/&lt;package&gt;/&lt;id&gt; handler
+/usr/share/uapi/VERSION                  package version (one line)
+/usr/share/uapi/lib/*.uc                 every module in src/lib (the install globs
+                                          the directory, so this needs no list here)
+/usr/share/uapi/resources/*.uc           curated resource modules
+/usr/share/uapi/openapi.json             generated OpenAPI 3.1 spec
+/usr/bin/uapi-token                      token CLI
+/etc/config/uapi                         conffile (mode 0600, conffile-marked)
+/etc/uci-defaults/99-uapi                one-shot install hook
+</code></pre>
+<p>Runtime files created on first use (tmpfs, reset on reboot):</p>
+<pre><code>/tmp/uapi-ratelimit/&lt;token&gt;.txt          per-token bucket state
+/tmp/uapi-idempotency/&lt;sha&gt;.json         per-key cached POST responses (24h TTL)
+/tmp/uapi-metrics/&lt;series&gt;/&lt;labels&gt;.txt  Prometheus counter/histogram store
+/var/run/uapi-token-update/&lt;token&gt;       last-used throttle sentinel
+/var/lock/uapi.lock                      global flock (SH for uci tx, EX for non-uci)
+/var/lock/uapi.pkg.&lt;package&gt;.lock        per-package EX flock
+</code></pre>
+<p><code>/etc/config/uapi</code> is marked as a conffile, so upgrades preserve
+operator-created tokens.</p>
+<p>Dependencies (pulled in automatically):</p>
+<pre><code>uhttpd uhttpd-mod-ucode ucode
+ucode-mod-ubus ucode-mod-uci ucode-mod-fs ucode-mod-digest ucode-mod-log
+rpcd-mod-iwinfo
+</code></pre>
+<h2 id="build-steps">Build steps</h2>
+<h3 id="1-get-the-matching-openwrt-sdk">1. Get the matching OpenWrt SDK</h3>
+<pre><code class="language-sh">SDK_URL=https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+mkdir -p build/sdk
+curl -L &quot;$SDK_URL&quot; | tar --use-compress-program=unzstd -xvf - -C build/sdk --strip-components=1
+</code></pre>
+<p>Adjust <code>targets/x86/64</code> for your target architecture if cross-compiling for something other than x86_64. uapi is pure ucode (<code>PKGARCH:=all</code>), so the resulting <code>.apk</code> is architecture-independent.</p>
+<h3 id="2-stage-the-package-files">2. Stage the package files</h3>
+<pre><code class="language-sh">make openapi   # regenerate build/openapi.json
+make stage     # populate build/openwrt/uapi/files/
+</code></pre>
+<h3 id="3-build-inside-the-sdk">3. Build inside the SDK</h3>
+<pre><code class="language-sh">cd build/sdk
+./scripts/feeds update -a
+./scripts/feeds install -a
+
+# Add our package as a local feed entry. The Makefile expects to find
+# ./files relative to itself, so symlink the package dir we just staged.
+ln -s ../../openwrt/uapi package/uapi
+
+make defconfig
+make package/uapi/compile V=s
+</code></pre>
+<p>The output <code>.apk</code> lands at <code>bin/packages/all/base/uapi-&lt;version&gt;-r1.apk</code> (or whatever the SDK reports at the end of the build).</p>
+<h3 id="4-install-on-a-router">4. Install on a router</h3>
+<pre><code class="language-sh">scp bin/packages/all/base/uapi-*.apk root@&lt;router&gt;:/tmp/
+ssh root@&lt;router&gt; 'apk add /tmp/uapi-&lt;version&gt;-r1.apk'
+ssh root@&lt;router&gt; 'uapi-token create --name first --scope &quot;*:rw&quot;'
+</code></pre>
+<p>The CLI prints the cleartext bearer to stdout exactly once. Save it.</p>
+<h2 id="post-install-behavior">Post-install behavior</h2>
+<p>The <code>postinst</code> script runs <code>/etc/uci-defaults/99-uapi</code> immediately on live installs (not chroots/INSTROOT builds) and then deletes the script. That single run:</p>
+<ol>
+<li>Checks if <code>uhttpd.main.ucode_prefix</code> already lists <code>/api/v2=/usr/share/uapi/main.uc</code>. If so, exits cleanly.</li>
+<li>Otherwise adds the entry, commits the uhttpd config, and reloads uhttpd.</li>
+</ol>
+<p>After that, <code>https://&lt;router&gt;/api/v2/healthz</code> is reachable.</p>
+<p>The post-install message printed to the operator:</p>
+<pre><code>uapi installed. To start using it:
+  1. Create a token:    uapi-token create --name &lt;label&gt; --scope '*:rw'
+  2. Verify it works:   curl -H &quot;Authorization: Bearer &lt;token&gt;&quot; https://&lt;router&gt;/api/v2/system
+  3. See docs at:       /usr/share/uapi/openapi.json
+</code></pre>
+<h2 id="removal">Removal</h2>
+<p><code>apk remove uapi</code> triggers the <code>prerm</code> hook, which:</p>
+<ol>
+<li>Removes the <code>ucode_prefix</code> entry from <code>uhttpd.main</code>.</li>
+<li>Commits uhttpd.</li>
+<li>Reloads uhttpd.</li>
+</ol>
+<p>These three steps run BEFORE the handler file is deleted. Order matters: if the prefix entry survived past handler removal, uhttpd would dispatch <code>/api/v2/*</code> to a missing <code>main.uc</code> and every request would 500 until the operator manually fixed the uhttpd config. Reorder only with care.</p>
+<p>The token store at <code>/etc/config/uapi</code> is preserved (conffile semantics). To wipe it: <code>rm /etc/config/uapi</code> after removal.</p>
+<h2 id="upgrade-contract">Upgrade contract</h2>
+<p><code>/etc/config/uapi</code> is marked as a conffile (<code>Package/uapi/conffiles</code> in the OpenWrt Makefile). The token store is precious user state and is preserved across <code>apk upgrade</code>. Files under <code>/usr/share/uapi/</code> are package-owned and freely overwritten by the upgrade; never add conffile markers to handler or library files there or upgrades will stop replacing them.</p>
+<h2 id="release-artifacts">Release artifacts</h2>
+<p>Tag-pushed releases produce more than just the APK:</p>
+<ul>
+<li><strong>APK</strong> at <code>bin/packages/all/uapi-&lt;version&gt;-r&lt;N&gt;.apk</code>. <code>PKGARCH:=all</code> means a single APK works on every OpenWrt arch.</li>
+<li><strong>SPDX 2.3 SBOM</strong> at <code>build/sbom.spdx.json</code> (via <code>make sbom APK=&lt;apk&gt;</code>). Carries every shipped file's sha256, package dependencies, and the built APK's verification hash.</li>
+<li><strong>Multi-arch verification</strong>: CI's <code>verify-arch-build</code> matrix cross-compiles against <code>aarch64_generic</code>, <code>arm_cortex-a7</code>, and <code>mips_24kc</code> SDKs. It does NOT prove arch-neutrality: it compares no digests and has no x86_64 leg to compare against. What it hard-fails on is a missing per-arch SDK pin, a tarball that does not match its pin, a cross-build that breaks, and a build that yields no <code>.apk</code>. See the comment on the job itself.</li>
+<li><strong>Signed tag</strong>: required for the <code>release-apk</code> job to run; verified against <code>.github/release-signers.asc</code>.</li>
+<li><strong>Reproducible SDK pin</strong>: <code>build/sdk.sha256</code> records the exact SDK tarball checksums for all four arches.</li>
+</ul>
+<p>See <code>docs/release-process.md</code> for the full release flow, signed-tag setup, and pre-tag checklist.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/packaging.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/packaging.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

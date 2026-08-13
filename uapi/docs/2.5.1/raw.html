@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>`/api/v2/raw/&lt;package&gt;/&lt;id&gt;`: generic uci passthrough - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / `/api/v2/raw/&lt;package&gt;/&lt;id&gt;`: generic uci passthrough</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="apiv2rawpackageid-generic-uci-passthrough"><code>/api/v2/raw/&lt;package&gt;/&lt;id&gt;</code>: generic uci passthrough</h1>
+<p>The curated endpoints (<code>/firewall/rules</code>, <code>/network/interfaces</code>, etc.) wrap a small set of OpenWrt config types with stable schemas and Terraform-friendly JSON. For everything else, <code>/raw/</code> gives you the underlying uci surface with the same atomic-transaction guarantees and the same auth model.</p>
+<p><strong><code>/raw/</code> is not raw ubus.</strong> The endpoint exposes arbitrary uci packages and section types, not arbitrary ubus services. Sending ubus calls directly through uapi remains off-limits. The closest uapi gets to ubus is reading the runtime block (<code>runtime: {...}</code>) that curated resources populate from selected ubus calls; that is per-resource, hand-curated, and read-only.</p>
+<h2 id="stability">Stability</h2>
+<p><strong>URL structure, verbs, auth/scope behavior, and error envelope are
+stable within a package major</strong> (today: v2.x). The composition rule
+(<code>raw:*</code> permission + the section's domain-tree permission both
+required) is part of the contract and will not loosen across minor
+bumps.</p>
+<p><strong>Payload shape follows uci.</strong> uci is OpenWrt's moving target: when an
+OpenWrt release renames a field, drops a section type, or changes the
+default for an option, <code>/raw/&lt;that-package&gt;/...</code> payloads change with
+it. Track those upstream changes the way you'd track them if you were
+editing <code>/etc/config/...</code> directly.</p>
+<p>If you want a stable, semver-bound contract, use the curated endpoint
+for that resource if one exists, or open an issue to add one.</p>
+<h2 id="shape">Shape</h2>
+<p><code>GET /api/v2/raw/&lt;package&gt;</code> lists every section in the package as an array. Each item has:</p>
+<pre><code class="language-json">{
+  &quot;id&quot;: &quot;&lt;section name&gt;&quot;,
+  &quot;.type&quot;: &quot;&lt;section type&gt;&quot;,
+  &quot;managed&quot;: true,
+  &quot;&lt;option1&gt;&quot;: &quot;...&quot;,
+  &quot;&lt;option2&gt;&quot;: [&quot;...&quot;],
+  ...
+}
+</code></pre>
+<p><code>managed: true</code> means the section has a real <code>.name</code> (named at creation by uapi or by another tool); <code>managed: false</code> means it is anonymous (<code>cfg012345</code>-style). uapi does not distinguish between writes to anonymous and named sections via <code>/raw/</code>. It is derived from uci's <code>.anonymous</code> flag on every read and is never stored, so <code>/raw/</code> ignores it on write: sending <code>managed</code> in a body neither changes the section nor lands as an option. Before 2.5.0 it did land, as a literal <code>option managed</code>, and that stored string then shadowed the derived value on read. If you want adoption (rename an anonymous section to a uapi-style ULID), the curated endpoints for that type provide <code>POST .../adopt</code>.</p>
+<p><code>GET /api/v2/raw/&lt;package&gt;/&lt;id&gt;</code> returns one section in the same shape.</p>
+<p><code>POST /api/v2/raw/&lt;package&gt;</code> creates a section. The request body must include <code>.type</code>. If <code>id</code> is supplied, it must match <code>/^[A-Za-z0-9_]+$/</code> (uci's section-name charset) and must not collide with an existing section; otherwise uapi returns <code>422 validation_failed</code> with field <code>id</code> and code <code>invalid_format</code>, or <code>409 conflict</code> respectively. If <code>id</code> is omitted, uapi generates a ULID-style id with a type-derived single-char prefix.</p>
+<pre><code class="language-json">{
+  &quot;.type&quot;: &quot;rule&quot;,
+  &quot;target&quot;: &quot;ACCEPT&quot;,
+  &quot;src&quot;: &quot;lan&quot;,
+  &quot;dest_port&quot;: &quot;8080&quot;,
+  &quot;proto&quot;: &quot;tcp&quot;
+}
+</code></pre>
+<p>The response is the new section plus:</p>
+<pre><code class="language-json">{
+  ...
+  &quot;reloaded&quot;: true,
+  &quot;reload_services&quot;: [&quot;firewall&quot;]
+}
+</code></pre>
+<p><code>reloaded: false</code> plus a <code>reload_note</code> string when uapi does not know which service to reload for the package. The configuration is on disk; you must reload the relevant daemon manually.</p>
+<p><code>PUT</code> replaces all non-meta options. <code>PATCH</code> merges. <code>DELETE</code> is <code>204 No Content</code>.</p>
+<h2 id="auth">Auth</h2>
+<p>Every raw request needs <strong>two</strong> scope checks, evaluated independently:</p>
+<ol>
+<li><strong>Raw tree</strong>: <code>raw</code> or <code>raw:&lt;package&gt;</code> must permit the verb.</li>
+<li><strong>Domain tree</strong>: the section's <code>.type</code> is mapped to its curated domain path (<code>firewall.rule</code> -&gt; <code>firewall:rules</code>, etc.) and the same verb must be permitted there. For packages not in the curated map, the domain path is just <code>[&lt;package&gt;]</code>.</li>
+</ol>
+<p>The dual check exists so granting <code>raw:rw</code> does not silently bypass a carefully-scoped <code>firewall:rules:ro</code>. If the deepest matching scope on either tree denies, the request is denied.</p>
+<p>For unknown packages (e.g. <code>dropbear</code>, <code>openvpn</code>), only <code>*:rw</code> or a package-level scope like <code>dropbear:rw</code> permits the domain side.</p>
+<h2 id="reload-mapping">Reload mapping</h2>
+<p>The reload service list is computed from <code>/etc/config/ucitrack</code> plus a small fallback table for known packages:</p>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Reload services</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>network</td>
+<td>network</td>
+</tr>
+<tr>
+<td>wireless</td>
+<td>network</td>
+</tr>
+<tr>
+<td>firewall</td>
+<td>firewall</td>
+</tr>
+<tr>
+<td>dhcp</td>
+<td>dnsmasq</td>
+</tr>
+</tbody>
+</table>
+<p>If <code>/etc/config/ucitrack</code> has an entry for the package, its <code>option init</code> (plus <code>list affects</code> chain) takes precedence over the fallback table.</p>
+<h2 id="examples">Examples</h2>
+<p>See <code>examples/curl/raw.sh</code> for end-to-end usage.</p>
+<h2 id="when-not-to-use-raw">When not to use <code>/raw/</code></h2>
+<p>If a curated endpoint exists for the section type, prefer it. The curated layer:</p>
+<ul>
+<li>Normalizes <code>"1"</code>/<code>"0"</code>/<code>"on"</code>/<code>"off"</code> to real JSON booleans.</li>
+<li>Lifts single-value uci list options to JSON arrays consistently.</li>
+<li>Validates per-field (formats, enums, cross-references) before staging.</li>
+<li>Returns a stable schema that survives uci-side renames.</li>
+<li>Generates ULID IDs that survive <code>/etc/config</code> rewrites.</li>
+</ul>
+<p><code>/raw/</code> skips all of that. It is the escape hatch, not the front door.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/raw.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/raw.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

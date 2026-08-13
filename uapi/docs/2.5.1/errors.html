@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Errors - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Errors</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="errors">Errors</h1>
+<p>The error model is RFC 7807-inspired but not strictly conformant. <code>application/json</code> throughout. Success responses are the resource value at top level (GET/POST/PUT 2xx body <strong>is</strong> the resource; no <code>{ "data": {...} }</code> wrapper). DELETE success is <code>204 No Content</code> with <code>X-Request-Id</code> and no body. Errors always carry the envelope below.</p>
+<h2 id="envelope">Envelope</h2>
+<p>Every non-2xx response carries this body shape (Content-Type: <code>application/json</code>):</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: &quot;validation_failed&quot;,
+  &quot;message&quot;: &quot;Field 'ipaddr' is not a valid IPv4 address&quot;,
+  &quot;request_id&quot;: &quot;01HX1234567890ABCDEFGHJKMN&quot;,
+  &quot;errors&quot;: [
+    { &quot;field&quot;: &quot;ipaddr&quot;,  &quot;code&quot;: &quot;invalid_format&quot;, &quot;message&quot;: &quot;must be a valid IPv4 address&quot; },
+    { &quot;field&quot;: &quot;netmask&quot;, &quot;code&quot;: &quot;required&quot;,       &quot;message&quot;: &quot;is required&quot; }
+  ]
+}
+</code></pre>
+<ul>
+<li><code>code</code> is machine-readable, snake_case, stable within a package major.</li>
+<li><code>message</code> is human-readable English. Don't parse it.</li>
+<li><code>request_id</code> is a ULID echoed in the <code>X-Request-Id</code> response header on <strong>every</strong> response, success or error. Pair with the audit log line to trace a request server-side. Clients may supply their own via <code>X-Request-Id</code> header or <code>?request_id=</code> query param (validated against <code>^[A-Za-z0-9_-]{8,128}$</code>; malformed values fall back to a server-generated ULID).</li>
+<li><code>errors[]</code> is only present for <code>422 validation_failed</code>. <strong>All</strong> field errors are reported together so the client can fix everything in one round trip.</li>
+</ul>
+<p>For DELETE success, the response is <code>204 No Content</code> with the <code>X-Request-Id</code> header but no body.</p>
+<h2 id="top-level-codes">Top-level codes</h2>
+<table>
+<thead>
+<tr>
+<th>HTTP</th>
+<th><code>code</code></th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>bad_request</code></td>
+<td>Malformed JSON, wrong shape, body where none expected</td>
+</tr>
+<tr>
+<td>400</td>
+<td><code>invalid_cursor</code></td>
+<td>Malformed <code>?cursor=</code> or one referencing no current item</td>
+</tr>
+<tr>
+<td>401</td>
+<td><code>unauthorized</code></td>
+<td>No <code>Authorization</code> header</td>
+</tr>
+<tr>
+<td>401</td>
+<td><code>invalid_token</code></td>
+<td>Token not in store, expired, or source IP not in <code>allowed_cidrs</code></td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>insufficient_scope</code></td>
+<td>Token valid, scopes don't cover this verb/path</td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>scope_escalation_blocked</code></td>
+<td><code>POST /tokens</code> requested scopes outside the caller's</td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>tls_required</code></td>
+<td>Non-localhost client over plain HTTP</td>
+</tr>
+<tr>
+<td>404</td>
+<td><code>not_found</code></td>
+<td>Resource does not exist</td>
+</tr>
+<tr>
+<td>405</td>
+<td><code>method_not_allowed</code></td>
+<td>Verb not supported on this resource</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>conflict</code></td>
+<td>Duplicate name, dangling cross-reference, etc.</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>unmanaged_resource</code></td>
+<td>Tried to write to a section that needs to be adopted first</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>idempotency_key_conflict</code></td>
+<td>Same <code>Idempotency-Key</code> reused with a different body</td>
+</tr>
+<tr>
+<td>412</td>
+<td><code>precondition_failed</code></td>
+<td>Stale <code>If-Match</code> ETag, a matching <code>If-None-Match</code> on a write, or JSON Patch <code>test</code> op mismatch</td>
+</tr>
+<tr>
+<td>415</td>
+<td><code>unsupported_media_type</code></td>
+<td>Reserved, never returned. See the note below before branching on it</td>
+</tr>
+<tr>
+<td>422</td>
+<td><code>validation_failed</code></td>
+<td>Body parsed but failed schema or per-field rules</td>
+</tr>
+<tr>
+<td>423</td>
+<td><code>locked</code></td>
+<td>Another write transaction holds a lock on the same package (or the global lock for a non-uci writer); retry. The response message names the specific lock.</td>
+</tr>
+<tr>
+<td>429</td>
+<td><code>too_many_requests</code></td>
+<td>Per-token rate limit exceeded</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>internal_error</code></td>
+<td>Bug or unexpected condition</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>reload_failed_restored</code></td>
+<td>Daemon reload failed; uapi rolled back the uci change</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>reload_failed_unrecovered</code></td>
+<td>Reload AND restore failed. Loudest case; manual recovery</td>
+</tr>
+<tr>
+<td>503</td>
+<td><code>service_unavailable</code></td>
+<td>ubus unreachable, service not running</td>
+</tr>
+<tr>
+<td>503</td>
+<td><code>init_script_missing</code></td>
+<td><code>/etc/init.d/&lt;svc&gt;</code> not present for a resource's reload list</td>
+</tr>
+</tbody>
+</table>
+<p><code>unsupported_media_type</code> is reserved and never emitted. uapi does not inspect
+<code>Content-Type</code> on a request body at all: <code>text/plain</code>, or no header, is accepted
+and the write takes effect, so nothing can reach a 415. The code stays in the
+published <code>ErrorEnvelope.code</code> enum so a client that already branches on it does
+not have the value disappear, and no operation declares a 415 response. Enforcing
+it later would reject bodies that work today, which makes it a breaking change
+rather than a fix, and <code>POST /batch</code> sub-requests carry no per-item media type,
+so any rule could only apply to the outer request.</p>
+<p><code>batch_partial_failure</code> is special: it appears only in the body of a
+<code>POST /batch</code> abort response, with the HTTP status taken from the failing
+sub-request. The body carries <code>{code: "batch_partial_failure",
+aborted_at_index, error: &lt;sub-envelope&gt;, reverted: true}</code>.</p>
+<p>The reload-failure-restored response carries the init script's exit summary as an extension field:</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: &quot;reload_failed_restored&quot;,
+  &quot;message&quot;: &quot;Service reload failed; prior configuration has been restored&quot;,
+  &quot;request_id&quot;: &quot;01HX...&quot;,
+  &quot;reload_error&quot;: &quot;network exited with code 1: netifd: interface 'wan' has invalid proto&quot;
+}
+</code></pre>
+<p>The unrecovered case adds <code>restore_error</code> as well.</p>
+<h2 id="field-level-codes">Field-level codes</h2>
+<p>In <code>errors[].code</code> (only inside <code>422 validation_failed</code>):</p>
+<table>
+<thead>
+<tr>
+<th><code>code</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>required</code></td>
+<td>Required field missing</td>
+</tr>
+<tr>
+<td><code>invalid_type</code></td>
+<td>Wrong JSON type (string vs. number etc.)</td>
+</tr>
+<tr>
+<td><code>invalid_format</code></td>
+<td>Failed format validator (CIDR, MAC, IP, etc.)</td>
+</tr>
+<tr>
+<td><code>out_of_range</code></td>
+<td>Numeric or length bound exceeded</td>
+</tr>
+<tr>
+<td><code>not_in_enum</code></td>
+<td>Value not in the allowed set</td>
+</tr>
+<tr>
+<td><code>conflict</code></td>
+<td>References a missing or incompatible resource, or two fields naming one option disagree</td>
+</tr>
+<tr>
+<td><code>read_only</code></td>
+<td>Field is computed/runtime and can't be set</td>
+</tr>
+</tbody>
+</table>
+<p>Two more appear only inside <code>invalid_sections</code> in <code>GET /diagnostics?validate=1</code>, never in a
+request rejection, because they describe a section the sweep could not judge rather than a
+field the caller got wrong:</p>
+<table>
+<thead>
+<tr>
+<th><code>code</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>unreadable</code></td>
+<td>The section could not be read into the resource's view at all</td>
+</tr>
+<tr>
+<td><code>sweep_failed</code></td>
+<td>The sweep itself threw for that resource; nothing was checked</td>
+</tr>
+</tbody>
+</table>
+<p><code>sweep_failed</code> carries an empty <code>field</code>, and its section reports <code>id: null</code> and
+<code>managed: null</code>. It is reported rather than swallowed because an empty result for a
+resource that was never actually checked is the one answer that endpoint must not give.</p>
+<h2 id="field-paths">Field paths</h2>
+<p>Dotted notation with bracket indexing: <code>match.src_zone</code>, <code>dns[0]</code>, <code>rules[2].target</code>.</p>
+<h2 id="response-headers">Response headers</h2>
+<p>Every response carries:</p>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>When</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Request-Id</code></td>
+<td>always</td>
+<td>ULID for log correlation.</td>
+</tr>
+<tr>
+<td><code>Content-Type: application/json</code></td>
+<td>always (except 204 no-content / <code>/metrics</code> text)</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>Strict-Transport-Security</code></td>
+<td>always</td>
+<td>1 year, includeSubDomains.</td>
+</tr>
+<tr>
+<td><code>X-Content-Type-Options</code></td>
+<td>always</td>
+<td><code>nosniff</code>.</td>
+</tr>
+<tr>
+<td><code>Referrer-Policy</code></td>
+<td>always</td>
+<td><code>no-referrer</code> (request_id appears in URLs).</td>
+</tr>
+<tr>
+<td><code>Cache-Control</code></td>
+<td>always</td>
+<td><code>no-store</code> (token-scoped data).</td>
+</tr>
+<tr>
+<td><code>ETag</code></td>
+<td>curated GET 200/304 and write success</td>
+<td>Quoted hash of this resource's own body (runtime block excluded). Sibling sections do not influence the value. Absent on raw passthrough, the non-uci endpoints and the read-only lease views, which therefore support neither conditional GET nor <code>If-Match</code>.</td>
+</tr>
+<tr>
+<td><code>WWW-Authenticate: Bearer</code></td>
+<td>every 401</td>
+<td><code>realm="uapi", error="&lt;code&gt;"</code> (RFC 7235 + RFC 6750).</td>
+</tr>
+<tr>
+<td><code>Retry-After: &lt;seconds&gt;</code></td>
+<td>423 locked, 429 too_many_requests</td>
+<td>Honor with jittered backoff.</td>
+</tr>
+<tr>
+<td><code>Link: &lt;?cursor=...&gt;; rel="next"</code></td>
+<td>paginated GETs when more items exist</td>
+<td>RFC 8288.</td>
+</tr>
+<tr>
+<td><code>X-Next-Cursor: c_&lt;id&gt;</code></td>
+<td>paginated GETs when more items exist</td>
+<td>Convenience companion to <code>Link</code>.</td>
+</tr>
+<tr>
+<td><code>Idempotent-Replayed: true</code></td>
+<td>POST replays via <code>Idempotency-Key</code></td>
+<td>Marker that the response was served from cache rather than re-applied.</td>
+</tr>
+<tr>
+<td><code>X-Reload-Status</code></td>
+<td>2xx on curated-resource writes</td>
+<td><code>ok</code> = init script reload exited 0 (NOT a runtime-convergence promise); <code>no_reload</code> = the resource has no reload services. See <code>docs/operations.md</code> "Success != converged".</td>
+</tr>
+<tr>
+<td><code>X-Reload-Services</code></td>
+<td>curated-resource writes, when status=ok</td>
+<td>Comma-separated list of init scripts that ran (e.g. <code>firewall</code>, <code>dnsmasq</code>).</td>
+</tr>
+<tr>
+<td><code>X-Kernel-Status</code></td>
+<td>2xx on curated-resource writes</td>
+<td>Whether the write reached the kernel, not just uci. <code>ok</code> = every interface it targeted was applied; <code>partial</code> = some were and some were skipped; <code>skipped</code> = it targeted interfaces and none was applied; <code>no_kernel</code> = the resource has no kernel path. An interface is skipped when it is down or netifd does not know it, which is not a failure: <code>ifup</code> reads the peers from uci.</td>
+</tr>
+<tr>
+<td><code>X-Kernel-Applied</code></td>
+<td>curated-resource writes, when at least one interface was applied</td>
+<td>Comma-separated interfaces whose kernel state the write changed (e.g. <code>wg0</code>).</td>
+</tr>
+<tr>
+<td><code>X-Mgmt-Path-Warning</code></td>
+<td>200/204 on a <code>network/interfaces</code> write that moved the caller's own path</td>
+<td><code>interface=&lt;id&gt; changed=&lt;fields&gt;</code>, e.g. <code>interface=wan changed=proto,ipaddr</code>. Advisory: the write already happened and was not refused. Present only when the written interface is the one this request arrived through and the write moved <code>disabled</code>, <code>proto</code>, <code>ipaddr</code>, <code>ipaddrs</code> or <code>netmask</code> (or deleted the section, reported as <code>changed=removed</code>). Absent otherwise. If the write genuinely severs the path this response never arrives, so <code>GET /diagnostics</code> reports the same interface ahead of a write. See <code>docs/operations.md</code> "Management-path warning".</td>
+</tr>
+</tbody>
+</table>
+<p>The four transaction-header rows above (<code>X-Reload-Status</code>, <code>X-Reload-Services</code>,
+<code>X-Kernel-Status</code>, <code>X-Kernel-Applied</code>) say "curated-resource writes" rather than "writes" because that is
+measured, not assumed: raw passthrough (<code>/raw/...</code>), <code>POST /batch</code>, and the non-uci writes
+(<code>/packages/...</code>, <code>/tokens</code>, <code>/system/password</code>, <code>/system/authorized_keys</code>) never reach
+<code>attach_reload_headers</code> and return none of them. Until 2.5.0 the OpenAPI document declared
+the reload pair on those responses anyway, which is why the wording here matters: a client
+generated from the spec was told to expect a header that was never going to arrive.</p>
+<p><code>X-Reload-Status: no_reload</code> is documented but not currently reachable: every writable
+resource declares at least one reload service, so shipped responses always say <code>ok</code>.
+The value stays defined because it describes a resource with no reload services, which
+is a shape the transaction still handles.</p>
+<h2 id="retry-after">Retry-After</h2>
+<p><code>423 locked</code> includes <code>Retry-After: 1</code>; <code>429 too_many_requests</code> carries
+the rate-limit bucket refill estimate. Wait that many seconds (or use
+jittered backoff) and try again. The 423 lock window is the duration of
+one atomic transaction (snapshot, validate, stage, commit, reload,
+possibly restore) and is typically well under a second.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/errors.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/errors.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Roadmap</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="roadmap">Roadmap</h1>
+<p>Things deliberately not yet shipped. Each entry says why and what shape the
+change would take. Update this file when an item moves between sections.</p>
+<h2 id="shipped-in-v200">Shipped in v2.0.0</h2>
+<p>The 35-item consolidation that paid for the major bump. Authoritative
+catalog in <code>CHANGELOG.md</code>'s v2.0.0 section; migration table in
+<code>docs/migration-v1-to-v2.md</code>. Highlights:</p>
+<ul>
+<li>snake_case rename across dropbear/snmpd/vnstat + strict integer typing +
+  full <code>schema_properties</code> completeness sweep.</li>
+<li>Conditional GET, <code>WWW-Authenticate</code> on 401, inbound <code>X-Request-Id</code>,
+  <code>/healthz</code> subsystem checks, <code>/schema/&lt;...&gt;</code>, <code>/auth/whoami</code>.</li>
+<li>Token expiry, IP scoping (<code>allowed_cidrs</code>), last-used tracking,
+  <code>/tokens</code> HTTP route, scope subset guard on mint.</li>
+<li>Per-token rate limit (<code>429 too_many_requests</code>), Prometheus <code>/metrics</code>,
+  idempotency keys, cursor pagination, <code>/diagnostics</code>.</li>
+<li><code>POST /batch</code> (multi-package all-or-nothing), JSON Patch (RFC 6902),
+  per-resource ETags + <code>If-Match</code> optimistic concurrency.</li>
+<li>Non-uci base library, lock-and-state audit, function-level coverage gate,
+  soak harness in CI, per-endpoint latency measurement in CI, signed-tag
+  verification, reproducible SDK pin.</li>
+</ul>
+<h2 id="shipped-in-v1x">Shipped in v1.x</h2>
+<p>(Preserved for historical context; new features land under v2.x or v3.)</p>
+<ul>
+<li><strong>ETags / <code>If-Match</code> optimistic concurrency</strong> in v1.2.</li>
+<li><strong>Schema-driven type check</strong> in <code>handler.uc</code> (v1.2).</li>
+<li><strong>Round-trip property tests + adversarial fuzz harness</strong> (v1.2).</li>
+<li><strong>Coverage inventory</strong> (<code>make coverage</code> walks <code>src/resources</code> and
+  <code>src/lib</code>; CI gates on 100% structural coverage).</li>
+<li><strong>Latency benchmark</strong> (<code>make bench</code> reports p50/p95/p99 across
+  representative reads).</li>
+<li><strong>Soak harness</strong> (<code>make soak</code>, long read-only load loop with SSH-side
+  RSS/fd/child sampling).</li>
+<li><strong>Per-package flock</strong> (v1.2): SH on <code>/var/lock/uapi.lock</code> + EX on
+  <code>/var/lock/uapi.pkg.&lt;package&gt;.lock</code>.</li>
+<li><strong>Security headers on every response</strong> (HSTS, nosniff, no-referrer,
+  no-store) (v1.2).</li>
+<li><strong>Central enum / min / max / pattern / items enforcement</strong> (v1.2).</li>
+<li><strong>Per-resource validate dedup</strong> (v1.2; -103 LOC).</li>
+</ul>
+<h2 id="needs-more-reflection">Needs more reflection</h2>
+<p>Items that are interesting but conflict with an architectural principle or
+have an unresolved design question. Not "later"; "later if the right shape
+appears".</p>
+<h3 id="commit-confirmed-timed-rollback-built-deferred-from-230"><code>commit-confirmed</code> timed rollback (built, deferred from 2.3.0)</h3>
+<p>Built and validated, then deferred out of 2.3.0 stable. The sidecar path
+won: a separate package (<code>apply-confirm</code>) owns the durable rollback timer
+and snapshot state so uapi gains no daemon of its own; uapi integrates by
+invoking its CLI. A confirmed write returns <code>202</code> + a token via per-write
+<code>?confirm=&lt;seconds&gt;</code>, and the ack is client-driven, which resolves the
+original state-divergence objection (the client acks only after verifying
+reachability, so a lost response prevents both the ack and the client
+marking its own apply complete):</p>
+<blockquote>
+<p>If the router gets no confirmation because of a network temporary issue
+between the router and Terraform, it reverts, but Terraform thinks it's
+OK. That state-divergence is worse than the original race we're trying
+to solve.</p>
+</blockquote>
+<p>The full per-write surface shipped in 2.3.0-rc1 and was soaked on live
+hardware, then removed before stable (recoverable from commit <code>a85a5cd</code>).
+Why deferred rather than shipped:</p>
+<ul>
+<li>No first-party consumer: the Terraform provider ships 2.3.0 without
+  consuming confirm, so the surface would enter a permanent v2 contract
+  with nothing exercising it.</li>
+<li>The authz model was unsettled and freezing it would have cost a major bump to
+  fix. <strong>Now decided</strong> (<code>docs/commit-confirm.md</code>): every operation that can move
+  state, arming either way plus ack and rollback, requires <code>uapi:confirm:rw</code>
+  and <code>:rw</code> on every curated resource backed by the derived package set, because
+  the revert's unit is the uci package and authority has to match blast radius.
+  That departs from rc1 on two counts, which is exactly why it had to be settled
+  before the surface froze.</li>
+</ul>
+<p>The dependency is not the blocker: <code>apply-confirm</code> 0.1.0 is released and on
+the apk feed. The hold is the wire-contract commitment.</p>
+<p>Plan: ship the whole feature once, coherently, in one minor (per-write
+<code>?confirm</code> plus the standalone <code>POST /confirm</code> arm under Features below, with
+one reviewed authz model). One of the two gates is now closed: the authz model
+is decided and recorded, so the feature can be scoped into a minor whenever its
+consumer appears. The other is not. Nothing exercises the surface, and freezing
+a v2 contract that nothing uses is precisely why it came out of 2.3.0, so there
+is still no target release. Design reference: <code>docs/commit-confirm.md</code>.</p>
+<h2 id="shipped-in-250">Shipped in 2.5.0</h2>
+<p>The next release is a minor, and its job is as much to make a clean 3.0.0
+possible as to ship features. The v3 list is in § v3 objectives above and has
+grown past what a single major used to be expected to carry, which is the point:
+a major is expensive to have and cheap to fill. What a minor has to do first is
+serve the notice <code>docs/deprecations.md</code> requires, because the window runs from
+the release that announces a removal, not the one that performs it. Cutting a
+major before a minor announces the rest would break clients with no window,
+spend the major, and still leave the changes unmade.</p>
+<p>Committed, in rough dependency order:</p>
+<ol>
+<li><strong>Announce the three v3 changes.</strong> Done ahead of the rest, since the window
+   runs from the release that ships it, not from the release that removes:
+   <code>ipaddr</code> deprecated as a write input, and the list-reads-<code>null</code> and
+   <code>dhcp/hosts.tag</code> convention changes recorded under "Announced response-shape
+   changes". The <code>ipaddr</code> case carries no <code>deprecated: true</code> flag on purpose; the
+   reasoning is in the deprecations log.</li>
+</ol>
+<p><code>tag</code> carried work beyond the announcement, because the schema promised a
+   string the resource does not always return: a <code>list tag</code>, which is what LuCI
+   writes, already read back as an array. The read is settled in this minor rather
+   than deferred: a stored scalar is split on the way out, so responses are always
+   an array. Deferring it was a mistake, and the reasoning is worth keeping because
+   the shape of the error recurs. The objection was to normalizing <em>storage</em>, which
+   would rewrite <code>option tag</code> into <code>list tag</code> under a client that had only read the
+   section. That observation was right; the conclusion that the read had to wait did
+   not follow from it. What remains for the major is the write form, since a
+   space-separated string is still accepted for clients generated against 2.4.1.
+2. <strong>Kernel-apply reporting.</strong> Done: <code>X-Kernel-Status</code> and <code>X-Kernel-Applied</code>,
+   mirroring the reload pair. Closes the gap the kernel apply left, where a
+   client writing a peer to a down tunnel got a <code>200</code> it could not distinguish
+   from one that reached the kernel. <code>values.platform_bool</code> landed alongside it,
+   because reading a netifd boolean with <code>normalize_bool</code> reported the
+   operator's intent rather than netifd's behaviour.
+3. <strong><code>disabled</code> on the network resources</strong>
+   (<a href="https://github.com/openwrt-iac/uapi/issues/64">#64</a>). Done. Deferred for a
+   while on the grounds that netifd parses the flag differently per section type,
+   which is real but does not need an upstream fix: each resource reads it with the
+   helper matching its own parser rather than all three sharing one. See the
+   Features entry.</p>
+<ol start="4">
+<li>
+<p><strong>Validation sweep on <code>/diagnostics?validate=1</code></strong> (#47). Done. Reports the
+   sections a write would now reject, before a write finds them one at a time.</p>
+</li>
+<li>
+<p><strong>Advisory management-path guard.</strong> Done. The cheap protection against the
+   lockout class commit-confirm was meant to cover: <code>GET /diagnostics</code> reports
+   <code>management_path</code>, the interface this request arrived through, and a
+   <code>network/interfaces</code> write that moves that interface's <code>disabled</code>, <code>proto</code>,
+   <code>ipaddr</code> or <code>netmask</code>, or deletes it, carries <code>X-Mgmt-Path-Warning</code>.</p>
+</li>
+</ol>
+<p>Advisory, not a refusal: renumbering the management path is legitimate, and
+   LuCI warns rather than blocking on the same four field names. Scope is LuCI's
+   deliberately, with no firewall analysis, because predicting a firewall lockout
+   means modelling fw4 ordering and a guess dressed as a warning is worse than
+   silence. The interface comes from the kernel's route lookup rather than prefix
+   containment, which is what makes it correct for an operator arriving from
+   another network, the case that matters most, and what makes it work for IPv6.</p>
+<p>Its limit is structural and documented: if the write really does strand the
+   caller, the response never arrives. <code>management_path</code> is the pre-flight half
+   for anyone who wants to check first.</p>
+<p>Decided, and deliberately still not scheduled:</p>
+<ul>
+<li><strong>Commit-confirmed apply.</strong> The authz model that blocked it is settled
+  (<code>docs/commit-confirm.md</code>), so that gate is closed. It stays out of 2.5.0 on
+  two others, and the second is now stronger than when the feature was deferred.</li>
+</ul>
+<p>No first-party consumer exercises the surface. And a provider cannot be that
+  consumer: the plugin protocol has no apply-scoped hook, and the one lifecycle
+  that looks like it fits, ephemeral resources, closes its window when its own
+  dependency chain finishes rather than when the apply does, so on a successful
+  apply it would confirm while other resources are still being written. Measured;
+  the analysis is in <code>docs/commit-confirm.md</code>. So the consumer can only be an
+  operator wrapper, and an SSH wrapper gets most of the benefit at zero wire
+  surface here.</p>
+<p>Two consequences for whenever it is picked up. The per-write <code>?confirm</code> half
+  should be dropped rather than shipped: it has no consumer named in this repo and
+  a multi-resource apply using it fails at the second write and reverts the first.
+  And the standalone arm needs a renewal path before it is useful, which the
+  NETCONF prior art has had since 2011. The near-term protection for this risk
+  class is the advisory management-path guard under Features, not the timer.</p>
+<p>Deliberately not in 2.5.0: the mirrored-name retirement itself (only its
+announcement lands here, the removal is v3), and anything under Hardening, which
+carries no wire surface and needs no release to take effect.</p>
+<h2 id="v3-objectives">v3 objectives</h2>
+<p><code>docs/versioning.md</code> § What a major is for sets the policy: a major is expensive to have and
+cheap to fill, so when one happens it should break as much as it needs to in order to raise
+quality and remove complexity. This section is the list that makes that actionable. Anything
+deferred with "needs a major" belongs here with enough detail to act on later, because the
+failure mode is arriving at v3, shipping the items someone remembered, and paying the cost
+again for the rest.</p>
+<p><strong>Announced, with the deprecation window already running.</strong> These carry ledger rows in
+<code>docs/deprecations.md</code> and appear in the published spec's own "Upcoming in v3" block:</p>
+<ul>
+<li><code>network/interfaces.name</code> as a create input: removed, <code>id</code> is the universal spelling.</li>
+<li><code>network/interfaces.ipaddr</code> as a <em>write</em> input: removed, <code>ipaddrs</code> wins. <code>ipaddr</code> becomes
+  <code>readOnly</code> rather than disappearing.</li>
+<li><code>dhcp/hosts.mac</code> and <code>dhcp/hosts.mac_aliases</code>: removed entirely, <code>macs</code> is the only name.
+  Neither corresponds to a real uci option, so nothing survives as a read.</li>
+<li>List-valued fields read back <code>null</code> rather than <code>[]</code> when the uci key is absent.</li>
+<li><code>dhcp/hosts.tag</code> stops accepting a space-separated string on write.</li>
+</ul>
+<p><strong>All announced as of 2.5.0.</strong> The list below is now covered by <code>docs/deprecations.md</code> and
+the published spec's own "Upcoming in v3" block, which the reference lint keeps in step by
+count. It was not, when this section was first written: the claim that a removal with no
+migration target needs no window was wrong, since the notice is for the reader, not for the
+migration:</p>
+<ul>
+<li>Fields no OpenWrt component reads at all, found by auditing every option against its
+  reader on a running device (<code>scripts/audit-dead-fields.sh</code>, since several of these packages
+  ship only a Makefile in the SDK feed): <code>lldpd/config.enable_lldpmed</code>,
+  <code>unbound/server.enabled</code>, <code>unbound/server.prefetch</code>, <code>mwan3/globals.rtmon_interval</code>,
+  <code>mwan3/globals.local_source</code>, <code>vnstat/config.database_dir</code>, <code>interface_5min_hours</code> and
+  <code>month_rotate</code>, <code>usteer/config.max_assoc_sta</code>, and
+  <code>prometheus_node_exporter_lua/config.listen_ipv6</code> plus its seventeen collector toggles.
+  Each writes a uci option the daemon ignores, and none has a correctly-named counterpart
+  to point at, which is what separates them from the three below.</li>
+</ul>
+<p><code>vnstat/interfaces</code> is on this list as a whole endpoint rather than a field: it models a
+  section type vnstat never reads. <code>vnstat/config.interfaces</code> replaces it.</p>
+<p>Three fields that looked identical were <strong>fixed rather than announced</strong> in 2.5.0, because
+  a correctly-named option did exist: <code>lldpd/config.lldp_capabilities</code> now writes
+  <code>lldp_capability_advertisements</code>, <code>unbound/server.dnssec_enabled</code> writes <code>validator</code>, and
+  <code>snmpd/system.sys_services</code> writes <code>sysService</code>. They are not part of the v3 removal set.
+- <code>managed</code> leaves the request half of every resource schema. It is derived from uci's
+  <code>.anonymous</code> flag and no <code>toUci</code> reads it, so a <code>PUT</code> sending <code>managed: false</code> has always
+  answered 200 with <code>managed: true</code>; management state moves only through
+  <code>POST /&lt;resource&gt;/{id}/adopt</code>. 2.5.0 annotates it <code>readOnly</code>, which is the notice a
+  regenerated client acts on; v3 completes the split.</p>
+<ul>
+<li>Separate request and response schemas. One schema serves both directions today, which is
+  what forces <code>tag</code> to keep <code>string</code> in its type for writers, forces <code>ipaddr</code> to be
+  described in prose instead of <code>readOnly</code>, and makes any read/write asymmetry unstatable.
+  This is the single change that unblocks the most others.</li>
+<li>~~<code>412</code> rather than a silently-ignored precondition when <code>If-None-Match</code> arrives on a
+  write.~~ Done in 2.5.0, not deferred: the precondition seam already ran before the
+  transaction, so the change was a guard rather than the restructure this entry assumed.
+  RFC 9110 13.1.2 requires it; doing it properly means evaluating the precondition before
+  the transaction runs (13.2.2), which is a restructure rather than a guard.</li>
+<li>The <code>X-Reload-Status</code> / <code>X-Kernel-*</code> header set on <code>POST /batch</code>, which currently reports
+  nothing about the sub-writes it performed.</li>
+</ul>
+<p><strong>The audit gap is closed.</strong> Five packages ship only a Makefile in the SDK feed, so their
+options could not be checked against a reader from the sources: firewall4, netifd, odhcpd,
+usteer and sqm-scripts. Extracting the feeds was never needed, because every one of those
+readers is installed on a running device: firewall4 is ucode at <code>/usr/share/ucode/fw4.uc</code>,
+sqm-scripts is shell, and a uci option name a C daemon looks up is a literal in its string
+table, so <code>strings</code> answers for netifd, odhcpd and usteerd.</p>
+<p>All 174 options those modules write were checked against the reader that consumes them, with
+the harness self-checked in both directions first. An earlier run of it reported 63 dead
+firewall4 options, all of them false: the corpus variable was misnamed, so the lookup ran
+against nothing and everything looked unread. A sweep that finds nothing and a sweep that
+reads nothing are indistinguishable from the outside, so the harness now asserts it can find
+an option that is unmistakably live and cannot find an invented one.</p>
+<p>The sweep has since been widened to every curated resource and checked in as
+<code>scripts/audit-dead-fields.sh</code>, so the answer is re-runnable rather than a claim: 426 options
+across all 45 modules and 18 packages, 11 with no reader, all 11 accounted for as announced,
+decided or an artifact. Nothing unannounced.</p>
+<p>One real finding, <code>usteer/config.max_assoc_sta</code>, now announced. usteer is the one package
+where "the name appears in the daemon" is too weak a test: its init forwards a fixed list of
+uci options over ubus, and an option missing from that list never reaches usteerd no matter
+what the binary contains. <code>max_assoc</code> is in the daemon and is not on the list, so it is not
+a repoint target.</p>
+<p><strong>Simplification the removals unlock.</strong> Worth doing in the same pass, since each exists only
+to serve a compatibility case v3 deletes:</p>
+<ul>
+<li><code>resolve_for_replace</code> and <code>merge_for_patch</code> on <code>network/interfaces</code> and <code>dhcp/hosts</code>. Both
+  exist solely to decide which of two names for one uci option the caller meant. With one
+  name per option they are dead code, along with the conflict rules in both <code>validate</code>s.</li>
+<li>The mirrored-pair section of <code>docs/adding-a-resource.md</code> and its carve-out, which document
+  a hazard that stops existing.</li>
+<li><code>values.normalize_bool</code>'s remaining callers, once the libvalidate accepted set is actually
+  read out of ubox rather than guessed at. See <code>docs/ucode-quirks.md</code>.</li>
+</ul>
+<h2 id="features-additive-future-minor-bumps-in-v2x">Features (additive, future minor bumps in v2.x)</h2>
+<ul>
+<li>
+<p><strong><code>dhcp/hosts.match_tag</code>.</strong> Not modelled, though LuCI exposes it on the same
+  form as <code>tag</code> and dnsmasq's host handler reads it with <code>config_list_foreach</code>,
+  so it is a list on both sides with none of the scalar ambiguity <code>tag</code> carries.
+  Found while settling the <code>tag</code> shape. Additive, and it should be declared an
+  array from the start per that decision.</p>
+</li>
+<li>
+<p><strong>Upstream: one unresolvable peer endpoint should not take a tunnel down.</strong>
+  Filed as <a href="https://github.com/openwrt/openwrt/issues/24511">openwrt/openwrt#24511</a>.
+  <code>wg syncconf</code> is all or nothing and the proto handler escalates any failure to
+  <code>proto_setup_failed</code>, so a peer whose endpoint hostname does not resolve stops
+  the interface coming up at all, healthy peers included. Measured: <code>up=false</code>,
+  zero peers, no addresses, netifd retrying and giving up.</p>
+</li>
+</ul>
+<p>This is the half that still matters to us. The <code>wg set</code> apply protects the
+  <em>write</em>, not the <em>boot</em>: a peer whose endpoint resolves when written and stops
+  resolving later sits in uci, and the next reboot runs it through the proto
+  handler and drops the tunnel. No amount of local code fixes that, because the
+  platform owns the boot path.</p>
+<p>The <strong>peer change detection</strong> half needs nothing from us. It was reported
+  twice, on the devel list in 2023 and as
+  <a href="https://github.com/openwrt/netifd/pull/66">netifd#66</a> in 2026, and neither
+  landed in that form; it is instead solved in master by the ucode proto rewrite
+  (<code>package/network/utils/wireguard-tools/files/wireguard.uc</code>), whose <code>config</code>
+  function loads peers so the framework's change detection covers them. That
+  rewrite also fixed route metrics
+  (<a href="https://github.com/openwrt/openwrt/issues/23199">#23199</a>) but left
+  <code>proto.setup_failed()</code> exactly as it was.</p>
+<p>Neither outcome retires <code>src/lib/wg.uc</code>. Even with both fixed, a netifd-driven
+  apply stays asynchronous, so uapi still could not report whether a write
+  reached the kernel, which is what the transaction contract needs. Retiring the
+  local code would take netifd applying peer deltas synchronously, which is not
+  on anyone's roadmap.</p>
+<ul>
+<li><strong>Stop mirroring one uci option into two writable wire names.</strong> Two resources
+  do it: <code>ipaddr</code> / <code>ipaddrs</code> on <code>network/interfaces</code>, and <code>macs</code> / <code>mac</code> /
+  <code>mac_aliases</code> on <code>dhcp/hosts</code>. One uci list option is exposed under names that
+  are all readable and all writable, so a full-replace client carries every one
+  of them back with the ones it did not change now stale, and every write path
+  has to guess which the caller meant.
+  <code>resolve_for_replace</code> and <code>merge_for_patch</code> decide that per method
+  (<a href="https://github.com/openwrt-iac/uapi/issues/60">#60</a>,
+  <a href="https://github.com/openwrt-iac/uapi/issues/65">#65</a>, both in 2.4.1, the
+  second caused by the fix for the first) rather than removing the cause.</li>
+</ul>
+<p>The durable fix is one writable name per uci option. The list form is the
+  general one, so <code>ipaddr</code> becomes read-only: still surfaced for the v1.0
+  contract and for clients that only understand a scalar, but no longer
+  accepted on write, with <code>ipaddrs</code> the only input.
+  That is a removal from the write surface, so it needs a deprecation window
+  (<code>docs/deprecations.md</code>) announced in a minor and completed in v3, not a
+  patch. Until then the per-method resolution stays.</p>
+<p><code>dhcp/hosts</code> is the same defect one step further along, and shows what the
+  window costs. There the split was worse than a mirror: <code>mac</code> held the first
+  entry of <code>list mac</code> and <code>mac_aliases</code> the rest, so no single field ever
+  answered what a reservation matched, and it was the one place in the API
+  where a uci list option did not surface as a JSON array. 2.5.0 adds <code>macs</code>,
+  the whole list under one name, and deprecates both old names for removal in
+  v3. Doing so means three writable names for one option during the window,
+  which is why the rule in <code>docs/adding-a-resource.md</code> § Mirrored field pairs
+  permits a new mirror only when it retires an existing one and carries a
+  removal target.</p>
+<ul>
+<li><strong><code>disabled</code> on <code>network/interfaces</code>, <code>network/routes</code> and <code>network/rules</code>.</strong>
+  Filed as <a href="https://github.com/openwrt-iac/uapi/issues/64">openwrt-iac/uapi#64</a>.
+  uci carries <code>option disabled</code> on all three section types and netifd honours it
+  (<code>config.c</code> skips a disabled interface, <code>interface-ip.c</code> and <code>iprule.c</code> declare
+  the attribute), but none of the three models it, so an inert section reads back
+  as ordinary active config and a declarative client sees a converged resource
+  set with nothing to apply. It also cannot be cleared through the API, because a
+  <code>PUT</code> cannot unset a field the model does not have. <code>network/wireguard_peers</code>
+  already models it and is the shape to copy. Add it next to <code>auto</code> on
+  <code>network/interfaces</code> rather than in place of it: <code>auto '0'</code> leaves the
+  interface configured but not started at boot, <code>disabled '1'</code> makes netifd
+  ignore the section outright.</li>
+</ul>
+<p><strong>Shipped in 2.5.0, with the asymmetry handled rather than waited out.</strong> netifd parses the interface flag with
+  a literal compare against <code>"1"</code> while route and rule go through the boolean
+  blob converter, which also takes <code>true</code> (and only <code>true</code>; <code>on</code> and <code>yes</code> are
+  accepted by neither, and uci drops the option instead). So on 25.12.5
+  <code>option disabled 'true'</code> disables a route or a rule and leaves an interface
+  running, and reading it with one truthy parse would report an interface as
+  disabled while it is up. That is the same lie as the bug being fixed, inverted.</p>
+<p>Upstream closed the asymmetry in netifd <code>e97e36f</code>, 2026-07-16, "config: accept
+  'true' for the interface disabled option", but as of 2026-08-04 no OpenWrt branch
+  pinned it, master included. Waiting turned out to be the wrong call: the parser
+  difference is a fact about the device, so the read follows it per section type.
+  <code>network/interfaces</code> uses <code>strict_bool</code>, the other two use <code>platform_bool</code>, and a
+  unit test pins the difference in both directions, because unifying them puts the lie
+  back whichever way it is unified. When a branch carries <code>e97e36f</code> the interface
+  helper can widen, and that test is what will say so.</p>
+<p>The first cut shared one helper across all three and shipped the inverted lie for a
+  day: an interface carrying <code>disabled 'true'</code> read back as disabled while netifd had
+  it registered and running. Caught by re-reading this entry, and measured three times
+  against a reset baseline before and after.</p>
+<p>Two alternatives were weighed and turned down, recorded so they are not
+  re-argued from scratch:</p>
+<ul>
+<li><strong>Ship routes and rules now, defer interfaces.</strong> They need nothing from
+    upstream, since <code>values.platform_bool</code> is exactly right for both netifd
+    versions there. Rejected because it delivers the harmless two thirds and
+    defers the dangerous one, the interface being where disabling takes the
+    addresses, routes and peers with it; because <code>disabled</code> on two of three
+    sibling resources is an asymmetry no operator can explain from outside; and
+    because the provider would add attributes twice for one issue.</li>
+<li><strong>Ship all three and let <code>runtime</code> carry the disagreement</strong>, the way
+    <code>effective_proto</code> already exposes netifd running something other than what
+    uci asked for. Closer to the house pattern, and tempting. Rejected because
+    the signal is weaker than <code>effective_proto</code>'s: <code>disabled: true</code> with
+    <code>runtime.up: true</code> does prove the disagreement, but <code>disabled: true</code> with
+    <code>runtime.up: false</code> cannot separate disabled-and-honoured from
+    enabled-but-failed, which is the case an operator most needs told apart. If
+    the wait runs long enough to hurt, this is the option to revisit first.</li>
+</ul>
+<p>Additive, so a minor bump. <code>terraform-provider-uapi</code> needs matching attributes
+  on <code>uapi_network_interface</code>, <code>uapi_network_route</code> and <code>uapi_network_rule</code> once
+  the fields exist.</p>
+<ul>
+<li><strong>Standalone confirm arm over HTTP (<code>POST /confirm</code>).</strong> The per-write
+  <code>?confirm</code> never shipped (built in 2.3.0-rc1, removed before stable) and
+  should not: a DAG apply is N isolated provider RPCs with no apply-level
+  begin/end hook, and only one window can exist at a time, so a second
+  <code>?confirm</code> write gets <code>409 already_armed</code> with its own change rolled back. The Terraform-useful shape is apply-confirm's
+  <code>stage</code> primitive (arm once over a package set, ack once after the apply)
+  exposed over HTTP, so a wrapper can arm, run the apply, then ack or let it
+  auto-revert with no SSH hop. <code>ac_stage</code> already exists and the bare
+  <code>POST /confirm</code> slot is free (unrouted, so 404 like any unknown path). Locked design constraints if
+  built: the body names curated <strong>resources/scopes, never raw packages</strong>, and
+  uapi derives the package set and reload-service union from <code>RESOURCE_SOURCES</code>
+  (the same fold <code>/batch</code> does), which keeps the union correct-by-construction
+  and client strings out of the shell. Authz requires <code>uapi:confirm:rw</code> <strong>and</strong>
+  <code>:rw</code> on every curated resource backed by the <em>derived</em> package set, not just
+  the resources named: apply-confirm reverts whole uci packages while scopes
+  are per-resource and one package backs many (<code>network</code> backs 7 scopes,
+  <code>firewall</code> 5, <code>dhcp</code> 6), so package-granularity authz is the only way the
+  deadline auto-revert cannot restore a resource the caller could not write.
+  Corollary for operators: the wrap token is necessarily broader than the
+  apply it guards (wrapping a <code>network:routes</code>-only apply needs <code>:rw</code> on all
+  7 <code>network</code>-backed resources, since the revert can restore any of them), so
+  the guide must say "mint the wrap token at package granularity" or a narrow
+  token gets a confusing 403 on arm. New endpoint, so a minor bump (2.4.0+),
+  not a 2.3.x patch. Defer the merge
+  until <code>apply-confirm</code> is feed-stable and a concrete consumer asks: the
+  provider stays Option A (write path untouched) and the wrap is operator-
+  driven. Two residual hazards want a reference wrapper-with-ack/rollback-trap,
+  owned by the provider repo (the concrete consumer), not prose alone: the
+  box-global single-pending lock is held for a whole apply (serializing other
+  operators, per-write confirms, LuCI, and parallel CI, so no parallel CI
+  against one box), and a forgotten ack reverts the entire armed package to its
+  arm-time snapshot, silently undoing sibling-resource changes a partially-
+  failed apply already committed. The wrapper's ack-vs-rollback must key on
+  management-path reachability, not <code>terraform apply</code>'s exit code: a partial
+  failure where the box is still reachable should ack (Terraform has already
+  recorded the resources that succeeded, so acking keeps the box consistent
+  with state); only an unreachable box should be left to auto-revert (<code>apply;
+  if reachable then ack else let-expire</code>, never <code>if exit 0 then ack</code>). Origin:
+  terraform-provider-uapi integration feedback.</li>
+<li><strong>Webhooks / change notifications.</strong> Push notification to a configured
+  URL after a successful write. Needs reliable retry + dead-letter queue;
+  likely needs a sidecar. Defer until there's a concrete subscriber.</li>
+<li><strong>Server-Sent Events / streaming.</strong> Long-lived connections for log
+  streaming or change feeds. Fundamentally incompatible with the
+  fork-per-request model. Punt.</li>
+<li><strong>Per-field RBAC.</strong> Granular write permissions like "can edit MTU but not
+  IP on <code>network/interfaces</code>". Scope-level is enough for v2; this is
+  enterprise creep. Don't add until requested by a real deployment.</li>
+<li><strong>Content-Type negotiation (YAML, msgpack).</strong> Single-content-type
+  (<code>application/json</code>) is correct for IaC. Defer indefinitely.</li>
+<li><strong>CORS.</strong> Admin UI is LuCI; no browser-direct use case for uapi.</li>
+<li><strong>More resources.</strong> Curation completeness rule in <code>CLAUDE.md</code>: add when a
+  typical real configuration sets options the curated layer doesn't
+  surface. Current gap candidates worth opportunistic curation:
+  <code>mwan3/*</code>, <code>usteer/*</code> (passive band-steering daemon for OpenWrt 22+
+  multi-AP setups), <code>openvpn/*</code> (the daemon is supported by uci natively).</li>
+<li><strong><code>unbound/server</code> listen-address / interface binding.</strong> Field
+  feedback (v2.0.0 migration) flagged the inability to bind unbound to
+  a specific address (loopback-only recursive backend behind dnsmasq,
+  <code>127.0.0.1@5353</code>). Blocked upstream: OpenWrt's
+  <code>/usr/lib/unbound/unbound.sh:386</code> carries an explicit <code># TODO: add
+  UCI list for interfaces to bind</code>. The only knobs the init script
+  reads today are <code>listen_port</code>, <code>interface_auto</code>, and the per-trigger
+  <code>interface</code> (used for reload gating, not bind), so there is no uci
+  surface to curate. Path forward: open a PR against the OpenWrt
+  unbound package adding <code>list interface_bind '...'</code> (and likely
+  <code>list interface_outgoing '...'</code>), then curate the new options here
+  once a release ships them. Floor option if upstream rejects or
+  takes too long: a non-uci <code>unbound/extra_server_conf</code> resource
+  writing <code>/etc/unbound/unbound_srv.conf</code> (high bar per
+  <code>docs/non-uci-state.md</code>; only if option (a) genuinely stalls).</li>
+</ul>
+<h2 id="install-the-deferred-packages-in-ci">Install the deferred packages in CI</h2>
+<p>Partly done in 2.5.0. lldpd and vnstat2 are installed by <code>install_uapi</code>'s bootstrap, about
+560 KiB together, so <code>lldpd/config</code> and <code>vnstat/config</code> are exercised by
+<code>tests/integration/49_daemon_gated_resources_test.sh</code> and included in the stock-config
+round-trip. The install sits in the bootstrap rather than inside a test, which is what avoids
+the QEMU SLIRP failure that cost hours of CI when it was tried inline.</p>
+<p>Still outside the image, so still unexercised: snmpd, mwan3, sqm, usteer,
+prometheus-node-exporter-lua and openvpn. unbound is installed by <code>40_unbound_uci_ext_test.sh</code>
+but only while that test runs, which is not a guarantee another test can lean on.</p>
+<p>The cost of leaving it is measurable rather than theoretical: <code>vnstat/interfaces</code> modelled a
+section type vnstat never reads and shipped that way, because a resource for an uninstalled
+package is never exercised against real configuration, so a wrong section type is
+indistinguishable from a right one.</p>
+<p>Note for whoever picks up the rest: on the standing test box the distfeeds needed pointing at
+25.12.5 and the kmods feed at kernel <code>6.12.94-1-a7bc15f4...</code>, or every <code>kmod-*</code> dependency
+is unresolvable.</p>
+<h2 id="hardening-next-no-new-wire-surface">Hardening (next, no new wire surface)</h2>
+<ul>
+<li>
+<p><strong>Decide whether the perf bench should gate, and on what.</strong> It measures
+  per-endpoint p99 on every CI run and gates nothing: the comparison in
+  <code>tests/bench/ci_bench.sh</code> runs only against a committed <code>bench/baseline.json</code>,
+  which has never existed, so any size of latency regression has always shipped
+  green. The naive fix is to commit a baseline, and it is probably wrong: a p99
+  recorded on one GitHub runner class says little on another, so a percentage
+  threshold would flake instead of catching anything, and a flaky gate gets
+  ignored and then removed. The options worth weighing are an absolute ceiling
+  loose enough to survive runner variance while still catching an order-of-
+  magnitude regression, or leaving it as measurement and reading the numbers at
+  release time. Deciding needs a few runs' worth of variance data across runners,
+  which nobody has gathered. Until then the tree says measurement, not gate.</p>
+</li>
+<li>
+<p><strong>Finish the lock-state audit.</strong> <code>docs/lock-state-audit.md</code> covers 17 of the 36
+  sites its own reproduction command finds, and roughly seven of its line ranges have
+  drifted. Nine modules are absent entirely: <code>error_ring</code>, <code>idempotency</code>, <code>metrics</code>,
+  <code>mgmt</code>, <code>ratelimit</code>, <code>token_store</code>, <code>dhcp.leases</code>, <code>dhcp.leases6</code>, <code>dhcp.servers</code>. The
+  doc no longer claims completeness, so this is a coverage gap rather than a false
+  statement, but the missing sites are real fd and lock acquisitions with no release
+  proof written down. Re-run the command, audit each site, and consider whether the count
+  can be checked mechanically the way the read-honesty case list is.</p>
+</li>
+<li>
+<p><strong>Reporting-surface consumption is the provider's.</strong> <code>X-Kernel-Status</code>,
+  <code>management_path</code> and <code>?validate=1</code> are all emitted and documented here, and
+  <code>terraform-provider-uapi</code> consumes none of them. That is the provider's call, not a gap
+  in this repo, and it is recorded here only so the question is not re-opened as uapi
+  work.</p>
+</li>
+<li>
+<p><strong>Derive the property-fuzz resource list from the resource registry.</strong>
+  <code>tests/unit/read_honesty_test.uc</code> now does exactly this and is the pattern to
+  copy: it walks <code>src/resources/</code> and fails naming any module with a <code>validate()</code>
+  that has no case, so the list cannot fall behind the tree.
+  <code>tests/unit/property_test.uc</code> keeps <code>RESOURCES</code> as a hand-written literal, so a
+  new curated resource gets no fuzz coverage until somebody remembers to add it.
+  That is how <code>unbound.srv</code> and <code>unbound.ext</code> went unfuzzed: both are writable and
+  both have a <code>validate()</code>, and neither was in the list. They are in it now, but
+  the next resource can slip the same way. The read-only collections
+  (<code>dhcp.leases</code>, <code>dhcp.leases6</code>) have no <code>validate()</code> and are correctly excluded,
+  so a derived list needs that one filter.</p>
+</li>
+</ul>
+<p>Everything else this section used to list has shipped, and the section had gone
+stale enough to be misleading:</p>
+<ul>
+<li>Constant-time hash comparison in auth landed in v2.0.0
+  (<code>values.constant_time_equals</code>, used at <code>src/lib/auth.uc</code>).</li>
+<li><code>uapi_requests_total</code> already carries the <code>token_id</code> label
+  (<code>src/lib/metrics.uc</code>).</li>
+<li><code>/diagnostics</code> already returns <code>recent_errors</code> from the ring buffer
+  (<code>src/lib/error_ring.uc</code>, exposed in <code>src/main.uc</code>).</li>
+<li>CI already runs the property pass at a fixed 1000 iterations per resource
+  (<code>PROPERTY_ITERS=1000 make test-property</code>), which was the iteration gate this
+  section asked for.</li>
+</ul>
+<h2 id="out-of-scope-by-design">Out of scope by design</h2>
+<ul>
+<li><strong>Localization of error <code>message</code> strings.</strong> English-only; codes are
+  stable and translatable client-side.</li>
+<li><strong>Async/parallel ubus.</strong> <code>conn.call()</code> only, by design (see Concurrency
+  in CLAUDE.md).</li>
+<li><strong>In-memory caches across requests.</strong> Forked children only; the design
+  precludes them. State that must span requests lives in a file or in uci.</li>
+<li><strong>Multi-tenant scoping.</strong> Single admin namespace. Adding multi-tenancy
+  would require a richer auth model than scopes-on-tokens.</li>
+</ul>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/roadmap.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/roadmap.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

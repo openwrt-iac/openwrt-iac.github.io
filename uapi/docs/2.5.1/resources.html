@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curated resources - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Curated resources</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="curated-resources">Curated resources</h1>
+<p>This document indexes the 45 curated resources shipped in v2.x. For the full
+schema (every field, its type, enum values, ranges, patterns), read
+<code>build/openapi.json</code> (also served at <code>/api/v2/openapi.json</code> on a live
+router) or open it in Swagger UI. Per-resource sample curls live in
+<code>examples/curl/</code>.</p>
+<p>The authoritative inventory is the OpenAPI spec; if this document drifts,
+the spec wins.</p>
+<h2 id="the-daemon-must-be-installed-first">The daemon must be installed first</h2>
+<p>Curated resources that drive a daemon shipped as a separate OpenWrt
+package (<code>unbound/server</code>, <code>sqm/queues</code>, <code>snmpd/*</code>, <code>openvpn/instances</code>,
+<code>mwan3/*</code>, <code>vnstat/*</code>, <code>lldpd/config</code>, <code>prometheus_node_exporter_lua/config</code>,
+<code>uhttpd/instances</code> beyond <code>main</code>) need the underlying package installed
+before writes succeed. Writing to a resource whose daemon is absent
+returns <code>503 init_script_missing</code> with the missing
+<code>/etc/init.d/&lt;service&gt;</code> path in the response body, before any uci
+write. The pre-flight check is part of the atomic transaction recipe;
+no partial state is left behind.</p>
+<p>Install the daemon either out of band (<code>apk add unbound</code>, etc.) or
+through uapi itself via <code>POST /api/v2/packages/installed</code>. The latter
+is what a Terraform configuration would chain via <code>depends_on</code> on a
+<code>uapi_package</code> resource. The base uapi package's <code>Depends:</code> only
+covers what uapi <em>itself</em> needs to run (uhttpd, ucode mods); per-daemon
+packages are deliberately not pulled in.</p>
+<h2 id="network">Network</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>network/interfaces</code></td>
+<td><code>config interface</code></td>
+<td>Static/dhcp/dhcpv6/pppoe/wireguard. Optional <code>id</code> picks the section name at create time (uci section-name charset, 32 chars, tightened to 15 for <code>proto=wireguard</code> because netifd uses it as the kernel netdev name); absent, the server emits a 14-char <code>wg_&lt;rand&gt;</code> for wireguard or a 28-char ULID otherwise. <code>name</code> is the deprecated 2.1.0-era spelling of the same input, accepted until v3 (<code>docs/deprecations.md</code>). <code>runtime</code> block carries live ubus state (uptime, ipv4/ipv6 addresses, route table).</td>
+</tr>
+<tr>
+<td><code>network/devices</code></td>
+<td><code>config device</code></td>
+<td>Bridges, VLANs (8021q/8021ad), macvlan, veth, tun/tap.</td>
+</tr>
+<tr>
+<td><code>network/routes</code></td>
+<td><code>config route</code></td>
+<td>Static routes; cross-refs interface.</td>
+</tr>
+<tr>
+<td><code>network/rules</code></td>
+<td><code>config rule</code></td>
+<td>Policy routing.</td>
+</tr>
+<tr>
+<td><code>network/bridge_vlans</code></td>
+<td><code>config bridge-vlan</code></td>
+<td>Bridge VLAN tagging (vlan 1-4094 + port spec).</td>
+</tr>
+<tr>
+<td><code>network/wireguard_peers</code></td>
+<td><code>config wireguard_&lt;iface&gt;</code> (dynamic)</td>
+<td>Peers on a wireguard interface; preshared_key masked on read.</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>option disabled</code> is not modelled on <code>network/interfaces</code>, <code>network/routes</code> or
+<code>network/rules</code>.</strong> uci carries it on all three and netifd honours it, so a section
+disabled by hand or by another tool is inert on the router while these resources
+report it as ordinary active configuration: a <code>GET</code> shows the interface, route or
+rule as present and correct, and a declarative client sees nothing to apply. It
+also cannot be cleared through the API, because a <code>PUT</code> cannot unset a field the
+model does not have; deleting and recreating the section is the way back, since
+that rewrites it from the declared configuration.</p>
+<p>Until it is modelled, <code>runtime</code> is the check that does not lie. An interface with
+<code>runtime.up</code> false while nothing in its configuration explains why is the signal
+to read <code>/etc/config/network</code> directly. <code>network/wireguard_peers</code> does model
+<code>disabled</code>, so peers are unaffected.</p>
+<p>This is deferred rather than overlooked, on an upstream fix with no release date;
+<a href="https://github.com/openwrt-iac/uapi/issues/64">#64</a> and <code>docs/roadmap.md</code> carry
+the reasoning and the alternatives that were turned down.</p>
+<p>Reload: <code>network</code> (netifd).</p>
+<p><strong>Editing the interface that backs your management connection is dangerous.</strong>
+<code>/etc/init.d/network reload</code> returns exit 0 even when an interface fails to
+come up at runtime; uapi only sees the init script's exit code, not the
+daemon's runtime convergence.</p>
+<h2 id="firewall">Firewall</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>firewall/zones</code></td>
+<td><code>config zone</code></td>
+<td>input/output/forward policies, <code>network</code> list.</td>
+</tr>
+<tr>
+<td><code>firewall/rules</code></td>
+<td><code>config rule</code></td>
+<td>Nested <code>match: {src_zone, dest_zone, src_ip, dest_ip, src_port, dest_port, proto, family, mark, dscp}</code>. MARK and DSCP targets carry <code>set_mark</code> / <code>set_xmark</code> and <code>set_dscp</code>. <code>src_zone</code> is required only for NOTRACK, matching fw4.</td>
+</tr>
+<tr>
+<td><code>firewall/redirects</code></td>
+<td><code>config redirect</code></td>
+<td>DNAT + NAT loopback reflection. DNAT and SNAT. <code>match.src_dip</code> is the external address matched on a DNAT (and the address NAT reflection uses) and the rewrite source on an SNAT, where it is required along with a named <code>match.dest_zone</code>. Prefer <code>firewall/nat</code> for new source NAT; LuCI migrates these sections there.</td>
+</tr>
+<tr>
+<td><code>firewall/nat</code></td>
+<td><code>config nat</code></td>
+<td>Source NAT: SNAT (<code>snat_ip</code> / <code>snat_port</code>), MASQUERADE, or ACCEPT to exempt traffic from rewriting. <code>match.src_zone</code> is the outbound zone. An unset <code>match.family</code> means IPv4 only, which is fw4's default for NAT.</td>
+</tr>
+<tr>
+<td><code>firewall/forwardings</code></td>
+<td><code>config forwarding</code></td>
+<td>Zone-to-zone forwarding.</td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code> (singleton)</td>
+<td><code>config defaults</code></td>
+<td>Global verdicts, syn_flood, synflood_burst/rate, tcp_syncookies, flow_offloading.</td>
+</tr>
+</tbody>
+</table>
+<p>Reload: <code>firewall</code> (fw4).</p>
+<h2 id="wireless">Wireless</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>wireless/devices</code></td>
+<td><code>config wifi-device</code></td>
+<td>Radios (mac80211/broadcom), band, channel, htmode, country, txpower.</td>
+</tr>
+<tr>
+<td><code>wireless/interfaces</code></td>
+<td><code>config wifi-iface</code></td>
+<td>SSIDs. <code>key</code> write-only; responses include <code>has_key: bool</code>. <code>runtime</code> carries iwinfo state.</td>
+</tr>
+</tbody>
+</table>
+<p>Reload: <code>network</code>. Requires <code>rpcd-mod-iwinfo</code> at runtime for the
+<code>runtime</code> block on <code>wireless/interfaces</code>.</p>
+<h2 id="dhcp">DHCP</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dhcp/hosts</code></td>
+<td><code>config host</code></td>
+<td>Static leases. <code>macs</code> (the whole uci <code>list mac</code>; <code>mac</code> and <code>mac_aliases</code> are its deprecated positional split), <code>ip</code>, <code>name</code>, <code>leasetime</code>, <code>duid</code>, <code>tag</code>.</td>
+</tr>
+<tr>
+<td><code>dhcp/servers</code></td>
+<td><code>config dhcp</code></td>
+<td>Per-interface server config. <code>runtime</code> carries active-lease counts.</td>
+</tr>
+<tr>
+<td><code>dhcp/dnsmasq</code> (singleton)</td>
+<td><code>config dnsmasq</code></td>
+<td>Global dnsmasq tuning; forwarders, address overrides, rebind protection.</td>
+</tr>
+<tr>
+<td><code>dhcp/odhcpd</code> (singleton)</td>
+<td><code>config odhcpd</code></td>
+<td><code>maindhcp</code>, <code>leasefile</code>, <code>loglevel</code>.</td>
+</tr>
+<tr>
+<td><code>dhcp/leases</code> (read-only collection)</td>
+<td><code>/tmp/dhcp.leases</code></td>
+<td>IPv4 leases parsed from dnsmasq's lease file.</td>
+</tr>
+<tr>
+<td><code>dhcp/leases6</code> (read-only collection)</td>
+<td><code>/tmp/(hosts/odhcpd|odhcpd.leases)</code></td>
+<td>IPv6 leases from odhcpd. Per-IA-address entries.</td>
+</tr>
+</tbody>
+</table>
+<p>Reload: <code>dnsmasq</code> (the <code>dhcp</code> package's ucitrack fan-out covers odhcpd).</p>
+<h2 id="system">System</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system</code> (singleton)</td>
+<td><code>config system</code></td>
+<td>hostname, timezone, log_size, log_ip, log_proto, log_remote, urandom_seed.</td>
+</tr>
+<tr>
+<td><code>system/timeservers</code></td>
+<td><code>config timeserver</code></td>
+<td>NTP server list; reloads sysntpd.</td>
+</tr>
+<tr>
+<td><code>system/password</code></td>
+<td><code>/bin/busybox passwd</code> (non-uci, write-only)</td>
+<td><code>POST {user, password}</code> -&gt; 204. Audit-logged without password.</td>
+</tr>
+<tr>
+<td><code>system/authorized_keys</code></td>
+<td><code>/etc/dropbear/authorized_keys</code> (non-uci)</td>
+<td><code>GET</code>/<code>POST</code>/<code>PUT</code>/<code>DELETE</code> for SSH key entries. Server-side key-type validation.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="other-daemons">Other daemons</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dropbear/instances</code></td>
+<td><code>config dropbear</code></td>
+<td>Per-instance SSH config (port, password_auth, root_login, etc.).</td>
+</tr>
+<tr>
+<td><code>uhttpd/instances</code></td>
+<td><code>config uhttpd</code></td>
+<td>Per-instance HTTP server. Validate refuses to strip uapi's own <code>ucode_prefix</code> from <code>main</code> (self-lockout protection).</td>
+</tr>
+<tr>
+<td><code>uhttpd/certs</code></td>
+<td><code>config cert</code></td>
+<td>px5g cert generation params.</td>
+</tr>
+<tr>
+<td><code>unbound/server</code> (singleton)</td>
+<td><code>config unbound</code></td>
+<td>Recursive DNS tuning.</td>
+</tr>
+<tr>
+<td><code>unbound/srv</code> (singleton)</td>
+<td><code>config unbound_srv 'main'</code></td>
+<td>Server-clause directives (<code>interface_bind</code>, <code>interface_outgoing</code>, <code>ip_transparent</code>, plus a raw <code>srv_line</code> passthrough). Requires <code>apk add unbound-uci-ext</code> from the openwrt-iac feed; otherwise the first write returns <code>503 init_script_missing</code>.</td>
+</tr>
+<tr>
+<td><code>unbound/ext</code> (singleton)</td>
+<td><code>config unbound_ext 'main'</code></td>
+<td>Outside-server clauses (<code>forward-zone:</code>, <code>view:</code>, <code>stub:</code>, <code>remote-control:</code>) expressed as a verbatim <code>ext_line</code> list (one entry per rendered line). Same install dependency as <code>unbound/srv</code>.</td>
+</tr>
+<tr>
+<td><code>sqm/queues</code></td>
+<td><code>config queue</code></td>
+<td>Per-interface SQM shaping.</td>
+</tr>
+<tr>
+<td><code>snmpd/agents</code></td>
+<td><code>config agent</code></td>
+<td>SNMP listen addrs.</td>
+</tr>
+<tr>
+<td><code>snmpd/com2secs</code></td>
+<td><code>config com2sec</code></td>
+<td>community-to-security mapping.</td>
+</tr>
+<tr>
+<td><code>snmpd/groups</code></td>
+<td><code>config group</code></td>
+<td>SNMP group definitions.</td>
+</tr>
+<tr>
+<td><code>snmpd/accesses</code></td>
+<td><code>config access</code></td>
+<td>group-to-view ACLs.</td>
+</tr>
+<tr>
+<td><code>snmpd/system</code> (singleton)</td>
+<td><code>config system</code> (snmpd)</td>
+<td>sys_location, sys_contact, etc. (snake_case in v2).</td>
+</tr>
+<tr>
+<td><code>lldpd/config</code> (singleton)</td>
+<td><code>config config</code> (lldpd)</td>
+<td>LLDP/CDP/etc. toggles.</td>
+</tr>
+<tr>
+<td><code>prometheus_node_exporter_lua/config</code> (singleton)</td>
+<td><code>config main</code></td>
+<td>listen + per-collector toggles.</td>
+</tr>
+<tr>
+<td><code>vnstat/config</code> (singleton)</td>
+<td><code>config vnstat</code></td>
+<td><code>interfaces</code>, the devices vnstat tracks. The other three fields are deprecated: they name keys of <code>/etc/vnstat.conf</code>, which nothing bridges from uci.</td>
+</tr>
+<tr>
+<td><code>vnstat/interfaces</code></td>
+<td><code>config interface</code> (vnstat)</td>
+<td>Per-iface enable.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="packages-non-uci">Packages (non-uci)</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Source of truth</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>packages/installed</code></td>
+<td>apk DB</td>
+<td><code>GET</code> lists, <code>POST {name}</code> installs (<code>apk add</code>), <code>DELETE /&lt;name&gt;</code> removes.</td>
+</tr>
+<tr>
+<td><code>packages/feeds</code></td>
+<td><code>/etc/apk/repositories.d/*.list</code></td>
+<td><code>POST {name, url}</code> creates a feed file + <code>apk update</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="anonymous-sections-and-adoption">Anonymous sections and adoption</h2>
+<p>OpenWrt's uci distinguishes <strong>named</strong> sections (stable identifier across rewrites) from <strong>anonymous</strong> sections (auto-assigned <code>cfgXXXXXX</code> ids that change on rewrite). Anonymous ids are useless for IaC state tracking.</p>
+<p>uapi-managed sections are always named: when a client POSTs to create a resource, the server emits a ULID-style identifier (Crockford base32, alphanumeric only, fitting uci's <code>[A-Za-z0-9_]</code> charset) and writes it as the section's <code>.name</code>. From that point on, the section behaves like any other named uci section and its id is stable. Optional one-character type prefix for grep-ability (<code>r_01HX...</code> for rules, <code>i_01HX...</code> for interfaces). No <code>uapi_</code> namespace prefix; uapi is just another writer to uci.</p>
+<p>Section names are caller-pickable on every CRUD resource (since 2.2.0). <code>POST /&lt;resource&gt;</code> accepts an optional <code>id</code> field; if supplied it becomes the section name (after charset / length / collision checks). Absent, the server emits the ULID.</p>
+<h3 id="pre-existing-anonymous-sections">Pre-existing anonymous sections</h3>
+<p>The common starting state for a router under management is a mix of LuCI-named sections, hand-edited sections, and anonymous sections from prior tooling. Posture: <strong>read-only by default, explicit adoption.</strong></p>
+<ul>
+<li><code>GET /&lt;resource&gt;</code> returns existing anonymous sections with a content-derived synthetic id and <code>managed: false</code>.</li>
+<li><code>PUT</code>/<code>PATCH</code>/<code>DELETE</code> on a <code>managed: false</code> section returns <code>409 unmanaged_resource</code>.</li>
+<li><code>POST /&lt;resource&gt;/&lt;id&gt;/adopt</code> on an <strong>anonymous</strong> section renames it under uapi's ULID scheme and flips it to <code>managed: true</code>. The section is writable like any other after that.</li>
+<li><code>POST /&lt;resource&gt;/&lt;id&gt;/adopt</code> on a <strong>named</strong> section is an idempotent acknowledgement: the section keeps its name and the response carries the existing view with <code>managed: true</code>. The 2.2.0 behavior change replaced the prior rename-to-ULID which broke uci cross-references where sections referenced this one by name (<code>firewall.zones.lan</code> → <code>firewall.rules.src_zone = "lan"</code>).</li>
+</ul>
+<p>Sections that already have a <code>.name</code> (e.g. LuCI-named <code>myrule</code>) are managed normally, using their existing <code>.name</code> as the id. uapi does not rewrite names it didn't author.</p>
+<p><code>GET</code> on a collection includes both managed and unmanaged sections by default. Clients filter via <code>?managed=true</code> / <code>?managed=false</code> when they want one or the other.</p>
+<h2 id="generic-raw-passthrough">Generic raw passthrough</h2>
+<p><code>/api/v2/raw/&lt;package&gt;/&lt;id&gt;</code> is the escape hatch for any uci config type
+uapi doesn't curate. See <code>docs/raw.md</code> for full semantics, scope
+composition rules, and stability caveat.</p>
+<h2 id="system-endpoints">System endpoints</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Auth</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /healthz</code></td>
+<td>none</td>
+<td><code>{status, version, checks: {ubus, uci, lock_dir, time_sync}}</code>. 503 when any subsystem is degraded.</td>
+</tr>
+<tr>
+<td><code>GET /openapi.json</code></td>
+<td>none</td>
+<td>The OpenAPI 3.1 spec.</td>
+</tr>
+<tr>
+<td><code>GET /schema/&lt;package&gt;/&lt;resource&gt;</code></td>
+<td>none</td>
+<td>One resource's <code>schema_properties</code>. <code>GET /schema</code> lists all keys.</td>
+</tr>
+<tr>
+<td><code>GET /auth/whoami</code></td>
+<td>any token</td>
+<td>Token introspection: id, scopes, source_ip, expires_at, allowed_cidrs, last_used.</td>
+</tr>
+<tr>
+<td><code>GET /tokens</code>, <code>POST /tokens</code>, <code>DELETE /tokens/&lt;id&gt;</code></td>
+<td><code>uapi:tokens:rw</code> (or <code>*:rw</code>)</td>
+<td>HTTP token rotation. POST requires the requested scopes to be a strict subset of the caller's.</td>
+</tr>
+<tr>
+<td><code>GET /metrics</code></td>
+<td><code>uapi:metrics:ro</code> (or <code>*:ro</code>)</td>
+<td>Prometheus 0.0.4 text.</td>
+</tr>
+<tr>
+<td><code>GET /diagnostics</code></td>
+<td><code>uapi:diagnostics:ro</code></td>
+<td>Version, uptime, loaded resources, current lock holders.</td>
+</tr>
+<tr>
+<td><code>POST /batch</code></td>
+<td>each sub-request scope-checked</td>
+<td>Multi-package all-or-nothing transaction (max 50 ops).</td>
+</tr>
+</tbody>
+</table>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/resources.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/resources.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Errors - uapi 1.2.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 1.2.1 / Errors</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="errors">Errors</h1>
+<h2 id="envelope">Envelope</h2>
+<p>Every non-2xx response carries this body shape (Content-Type: <code>application/json</code>):</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: &quot;validation_failed&quot;,
+  &quot;message&quot;: &quot;Field 'ipaddr' is not a valid IPv4 address&quot;,
+  &quot;request_id&quot;: &quot;01HX1234567890ABCDEFGHJKMN&quot;,
+  &quot;errors&quot;: [
+    { &quot;field&quot;: &quot;ipaddr&quot;,  &quot;code&quot;: &quot;invalid_format&quot;, &quot;message&quot;: &quot;must be a valid IPv4 address&quot; },
+    { &quot;field&quot;: &quot;netmask&quot;, &quot;code&quot;: &quot;required&quot;,       &quot;message&quot;: &quot;is required&quot; }
+  ]
+}
+</code></pre>
+<ul>
+<li><code>code</code> is machine-readable, snake_case, stable across versions within v1.</li>
+<li><code>message</code> is human-readable English. Don't parse it.</li>
+<li><code>request_id</code> is a ULID echoed in the <code>X-Request-Id</code> response header on <strong>every</strong> response, success or error. Pair with the audit log line to trace a request server-side.</li>
+<li><code>errors[]</code> is only present for <code>422 validation_failed</code>. <strong>All</strong> field errors are reported together so the client can fix everything in one round trip.</li>
+</ul>
+<p>For DELETE success, the response is <code>204 No Content</code> with the <code>X-Request-Id</code> header but no body.</p>
+<h2 id="top-level-codes">Top-level codes</h2>
+<table>
+<thead>
+<tr>
+<th>HTTP</th>
+<th><code>code</code></th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>bad_request</code></td>
+<td>Malformed JSON, wrong shape, body where none expected</td>
+</tr>
+<tr>
+<td>401</td>
+<td><code>unauthorized</code></td>
+<td>No <code>Authorization</code> header</td>
+</tr>
+<tr>
+<td>401</td>
+<td><code>invalid_token</code></td>
+<td>Token not in store, or store is empty</td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>insufficient_scope</code></td>
+<td>Token valid, scopes don't cover this verb/path</td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>tls_required</code></td>
+<td>Non-localhost client over plain HTTP</td>
+</tr>
+<tr>
+<td>404</td>
+<td><code>not_found</code></td>
+<td>Resource does not exist</td>
+</tr>
+<tr>
+<td>405</td>
+<td><code>method_not_allowed</code></td>
+<td>Verb not supported on this resource</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>conflict</code></td>
+<td>Duplicate name, dangling cross-reference, etc.</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>unmanaged_resource</code></td>
+<td>Tried to write to a section that needs to be adopted first</td>
+</tr>
+<tr>
+<td>415</td>
+<td><code>unsupported_media_type</code></td>
+<td>Body wasn't <code>application/json</code></td>
+</tr>
+<tr>
+<td>422</td>
+<td><code>validation_failed</code></td>
+<td>Body parsed but failed schema or per-field rules</td>
+</tr>
+<tr>
+<td>423</td>
+<td><code>locked</code></td>
+<td>Another write transaction holds the global lock; retry</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>internal_error</code></td>
+<td>Bug or unexpected condition</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>reload_failed_restored</code></td>
+<td>Daemon reload failed; uapi rolled back the uci change</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>reload_failed_unrecovered</code></td>
+<td>Reload AND restore failed. Loudest case; manual recovery</td>
+</tr>
+<tr>
+<td>503</td>
+<td><code>service_unavailable</code></td>
+<td>ubus unreachable, service not running</td>
+</tr>
+</tbody>
+</table>
+<p>The reload-failure-restored response carries the init script's exit summary as an extension field:</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: &quot;reload_failed_restored&quot;,
+  &quot;message&quot;: &quot;Service reload failed; prior configuration has been restored&quot;,
+  &quot;request_id&quot;: &quot;01HX...&quot;,
+  &quot;reload_error&quot;: &quot;network exited with code 1: netifd: interface 'wan' has invalid proto&quot;
+}
+</code></pre>
+<p>The unrecovered case adds <code>restore_error</code> as well.</p>
+<h2 id="field-level-codes">Field-level codes</h2>
+<p>In <code>errors[].code</code> (only inside <code>422 validation_failed</code>):</p>
+<table>
+<thead>
+<tr>
+<th><code>code</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>required</code></td>
+<td>Required field missing</td>
+</tr>
+<tr>
+<td><code>invalid_type</code></td>
+<td>Wrong JSON type (string vs. number etc.)</td>
+</tr>
+<tr>
+<td><code>invalid_format</code></td>
+<td>Failed format validator (CIDR, MAC, IP, etc.)</td>
+</tr>
+<tr>
+<td><code>out_of_range</code></td>
+<td>Numeric or length bound exceeded</td>
+</tr>
+<tr>
+<td><code>not_in_enum</code></td>
+<td>Value not in the allowed set</td>
+</tr>
+<tr>
+<td><code>conflict</code></td>
+<td>References a missing or incompatible resource</td>
+</tr>
+<tr>
+<td><code>read_only</code></td>
+<td>Field is computed/runtime and can't be set</td>
+</tr>
+</tbody>
+</table>
+<h2 id="field-paths">Field paths</h2>
+<p>Dotted notation with bracket indexing: <code>match.src_zone</code>, <code>dns[0]</code>, <code>rules[2].target</code>.</p>
+<h2 id="retry-after">Retry-After</h2>
+<p><code>423 locked</code> responses include <code>Retry-After: 1</code>. Wait that many seconds (or use jittered backoff) and try again. The lock window is the duration of one atomic transaction (snapshot, validate, stage, commit, reload, possibly restore) and is typically well under a second.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/errors.md</code> at tag <code>v1.2.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v1.2.1/docs/errors.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

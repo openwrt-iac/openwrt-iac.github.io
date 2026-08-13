@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Migrating from uapi v2 to v3 - uapi 3.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 3.0.0 / Migrating from uapi v2 to v3</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="migrating-from-uapi-v2-to-v3">Migrating from uapi v2 to v3</h1>
+<p>v3 removes what 2.5.0 announced and nothing else. Every change below appeared in the 2.5.0
+spec's own "Upcoming in v3" block and in <code>docs/deprecations.md</code>, so a client generated against
+2.5.0 has already been warned by its codegen about the flagged fields.</p>
+<p>A given uapi installation serves exactly one API major. There is no parallel <code>/api/v2/</code> and
+<code>/api/v3/</code> mount in the same binary. Operators who need to keep a v2 client working keep the
+<code>2.5.x</code> package installed; the 2.5.0 APK stays on its GitHub Release and the signed <code>v2.5.0</code>
+tag is the canonical v2 contract document.</p>
+<p><strong>The URL prefix changes from <code>/api/v2/</code> to <code>/api/v3/</code>.</strong> Update every client-side base URL.
+Upgrading the package removes the v2 prefix from uhttpd's <code>ucode_prefix</code> list and adds the v3
+one, so no manual uci edit is needed.</p>
+<h2 id="upgrade-path">Upgrade path</h2>
+<ol>
+<li><code>apk update &amp;&amp; apk upgrade uapi</code></li>
+<li>Change your base URL from <code>/api/v2</code> to <code>/api/v3</code></li>
+<li>Regenerate any typed client. Model names change: every resource now has a separate
+   <code>&lt;Name&gt;Request</code> and <code>&lt;Name&gt;Response</code> schema</li>
+<li>Verify: <code>GET /api/v3/healthz</code> returns <code>{"status":"ok","version":"3.0.0",...}</code></li>
+</ol>
+<h2 id="removed-request-fields-are-rejected-breaking">Removed request fields are rejected (Breaking)</h2>
+<p>A request naming a field the resource does not declare answers <code>422</code> with field code
+<code>unknown_field</code>, naming the path. In v2 such a key was dropped in silence, so a stale write
+answered <code>200</code> and changed nothing:</p>
+<pre><code># on a host whose reservation lists two MACs
+PATCH /api/v3/dhcp/hosts/printer {&quot;mac&quot;: &quot;aa:bb:cc:dd:ee:01&quot;}
+-&gt; 422 validation_failed, errors[0] = { field: &quot;mac&quot;, code: &quot;unknown_field&quot; }
+</code></pre>
+<p>This is the one breaking change in v3 that makes migration easier rather than harder. A client
+that still sends <code>mac</code>, <code>mac_aliases</code> or any removed field below now fails loudly on the first
+apply, instead of reporting success while the value went nowhere. Regenerating the client is
+still the right fix, and codegen against the v3 spec turns each of these into a compile error
+before a request is ever sent.</p>
+<p><strong><code>network/interfaces.name</code> on create fails now too.</strong> In v2 it was the sharpest silent case:
+uapi generated a section name, so the interface came back under a name the caller never chose,
+which an IaC client keying on its requested name read as drift and duplicated on the next apply.
+That cannot happen in v3:</p>
+<pre><code>POST /api/v3/network/interfaces {&quot;name&quot;: &quot;lan2&quot;, &quot;proto&quot;: &quot;static&quot;, &quot;ipaddrs&quot;: [&quot;192.0.2.77&quot;]}
+-&gt; 422 validation_failed, errors[0] = { field: &quot;name&quot;, code: &quot;unknown_field&quot; }
+</code></pre>
+<p>Rename the field to <code>id</code> and the create succeeds.</p>
+<p><strong>Three names stay accepted and ignored, on purpose.</strong> <code>id</code>, <code>managed</code> and <code>runtime</code> appear in
+every response and in no request schema, and every IaC apply is a read-modify-write, so refusing
+them would break sending a read straight back. The same holds for a field that is <code>readOnly</code>
+rather than removed: <code>network/interfaces.ipaddr</code> still exists in the model as a read, so a body
+carrying it answers <code>200</code> and the value is ignored. Only names the resource does not model at
+all are refused.</p>
+<h2 id="field-removals-breaking">Field removals (Breaking)</h2>
+<h3 id="dhcphosts"><code>dhcp/hosts</code></h3>
+<p><code>mac</code> and <code>mac_aliases</code> are gone. <code>macs</code> is the only name, and it is the whole uci <code>list mac</code>
+as one array.</p>
+<pre><code># v2
+{&quot;mac&quot;: &quot;aa:bb:cc:dd:ee:01&quot;, &quot;mac_aliases&quot;: [&quot;aa:bb:cc:dd:ee:02&quot;]}
+
+# v3
+{&quot;macs&quot;: [&quot;aa:bb:cc:dd:ee:01&quot;, &quot;aa:bb:cc:dd:ee:02&quot;]}
+</code></pre>
+<p>Neither removed name was ever a uci option: <code>mac</code> was the first entry of the list and
+<code>mac_aliases</code> the rest, so a client had to read two fields to learn what one reservation
+matched. Validation errors that were reported against <code>mac</code> now report against <code>macs</code>.</p>
+<h3 id="networkinterfaces"><code>network/interfaces</code></h3>
+<p><code>name</code> is gone as a create input. Send <code>id</code>, which is the universal section-name input across
+every CRUD resource and has been since 2.2.0.</p>
+<pre><code># v2
+POST /network/interfaces {&quot;name&quot;: &quot;wg0&quot;, &quot;proto&quot;: &quot;wireguard&quot;, ...}
+
+# v3
+POST /network/interfaces {&quot;id&quot;: &quot;wg0&quot;, &quot;proto&quot;: &quot;wireguard&quot;, ...}
+</code></pre>
+<p>The <code>422 conflict</code> that fired when <code>id</code> and <code>name</code> disagreed is gone with the field.</p>
+<p><code>ipaddr</code> is now read-only. It still appears in responses carrying the first entry of the uci
+<code>list ipaddr</code>; it is simply absent from the request schema. Send <code>ipaddrs</code>.</p>
+<p>This is the one removed field that does <strong>not</strong> fail silently, and deliberately so. A static
+interface needs an address, and counting a field no write can act on as one produced an
+interface with no address and a <code>200</code>:</p>
+<pre><code># v2: accepted, and the address landed
+# v3: 422, ipaddrs required
+POST /api/v3/network/interfaces {&quot;id&quot;: &quot;lan2&quot;, &quot;proto&quot;: &quot;static&quot;, &quot;ipaddr&quot;: &quot;192.0.2.99&quot;}
+</code></pre>
+<p>A read-modify-write client is unaffected, because a <code>GET</code> returns <code>ipaddrs</code> alongside <code>ipaddr</code>
+and echoing the body back carries the list.</p>
+<h3 id="fields-that-wrote-a-uci-option-nothing-reads">Fields that wrote a uci option nothing reads</h3>
+<p>Removed entirely, in both directions. Writes carrying them were already ignored, so nothing on
+the write side needs migrating; what changes is that they no longer appear in responses, where
+each used to carry a <code>default:</code> annotation an IaC client may have been keeping sticky.</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Removed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mwan3/globals</code></td>
+<td><code>local_source</code>, <code>rtmon_interval</code></td>
+</tr>
+<tr>
+<td><code>vnstat/config</code></td>
+<td><code>database_dir</code>, <code>interface_5min_hours</code>, <code>month_rotate</code></td>
+</tr>
+<tr>
+<td><code>lldpd/config</code></td>
+<td><code>enable_lldpmed</code></td>
+</tr>
+<tr>
+<td><code>unbound/server</code></td>
+<td><code>enabled</code>, <code>prefetch</code></td>
+</tr>
+<tr>
+<td><code>usteer/config</code></td>
+<td><code>max_assoc_sta</code></td>
+</tr>
+<tr>
+<td><code>prometheus_node_exporter_lua/config</code></td>
+<td><code>listen_ipv6</code> and all 17 collector toggles</td>
+</tr>
+</tbody>
+</table>
+<p>The per-field reasoning is in the 2.5.0 changelog entry. In short: each was modelled against an
+option name the owning daemon does not consult, and none had a correctly-named counterpart to be
+repointed at.</p>
+<h2 id="endpoint-removals-breaking">Endpoint removals (Breaking)</h2>
+<h3 id="vnstatinterfaces"><code>vnstat/interfaces</code></h3>
+<p>Gone. Use the <code>interfaces</code> array on the <code>vnstat/config</code> singleton.</p>
+<p><strong>The values differ in kind, not just in place.</strong> The removed endpoint took uci interface
+section names; vnstat wants device names as the kernel shows them. Migrating is a translation,
+not a copy:</p>
+<pre><code># v2
+POST /vnstat/interfaces {&quot;interface&quot;: &quot;lan&quot;}
+
+# v3
+PATCH /vnstat/config {&quot;interfaces&quot;: [&quot;br-lan&quot;]}
+</code></pre>
+<p>The endpoint never worked: uapi modelled <code>config interface</code> sections while vnstat only reads a
+<code>list interface</code> inside <code>config vnstat</code>, so a <code>POST</code> returned 200 and changed nothing the daemon
+looked at.</p>
+<h2 id="response-shape-changes-breaking">Response-shape changes (Breaking)</h2>
+<h3 id="list-valued-fields-read-back-null-when-the-uci-key-is-absent">List-valued fields read back <code>null</code> when the uci key is absent</h3>
+<p>Previously <code>[]</code>. uci cannot store an empty list, so <code>[]</code> already meant "absent" and
+distinguished nothing. A client generated against the v2 <code>{"type": "array"}</code> schema fails
+response validation in v3 unless it accepts null.</p>
+<p>This affects every uci-backed list on a curated resource. It does <strong>not</strong> affect the request
+and response envelopes (<code>BatchResponse.results</code>, <code>ErrorEnvelope.errors</code>, and the rest), where
+<code>[]</code> means empty rather than absent and is correct.</p>
+<h3 id="firewallredirects-match-fields-are-scalars"><code>firewall/redirects</code> match fields are scalars</h3>
+<p>Six fields under <code>match</code> change from an array capped at one entry to a plain string:
+<code>src_ip</code>, <code>src_dip</code>, <code>src_dport</code>, <code>dest_ip</code>, <code>dest_port</code>, <code>src_port</code>.</p>
+<pre><code># v2
+{&quot;match&quot;: {&quot;src_zone&quot;: &quot;wan&quot;, &quot;src_dport&quot;: [&quot;443&quot;], &quot;dest_ip&quot;: [&quot;192.168.1.10&quot;]}}
+
+# v3
+{&quot;match&quot;: {&quot;src_zone&quot;: &quot;wan&quot;, &quot;src_dport&quot;: &quot;443&quot;, &quot;dest_ip&quot;: &quot;192.168.1.10&quot;}}
+</code></pre>
+<p>firewall4 marks only <code>proto</code>, <code>src_mac</code> and <code>reflection_zone</code> as list options on a
+<code>config redirect</code>, and its parser refuses a list on the rest outright, discarding the whole
+section. The cap existed to stop uapi writing one; 2.4.0 could not narrow the type because that
+needs a major. <code>proto</code> is genuinely a list and does not change.</p>
+<p>The reason to care is when the mistake is caught. A second value used to be accepted by the
+schema and rejected at apply, after a declarative client had already committed to a plan and
+possibly written other resources. A string makes it a type error before anything is written.</p>
+<p>Validation errors on these fields lose their index: <code>match.src_dport</code> rather than
+<code>match.src_dport[0]</code>.</p>
+<h3 id="dhcphoststag-is-array-only"><code>dhcp/hosts.tag</code> is array-only</h3>
+<p>Responses have been arrays since 2.5.0. v3 drops the space-separated string on the request side
+too. dnsmasq word-splits either form identically, so the value does not change, only its
+spelling.</p>
+<h3 id="managed-leaves-every-request-schema"><code>managed</code> leaves every request schema</h3>
+<p>It is derived from uci's <code>.anonymous</code> flag and no write path ever read it, so a <code>PUT</code> sending
+<code>managed: false</code> always answered 200 with <code>managed: true</code>. It is present and read-only in
+response schemas. Management state moves through <code>POST /&lt;resource&gt;/{id}/adopt</code>.</p>
+<h3 id="separate-request-and-response-schemas">Separate request and response schemas</h3>
+<p>Every resource now has <code>&lt;Name&gt;Request</code> and <code>&lt;Name&gt;Response</code> instead of one <code>&lt;Name&gt;</code>. This is
+what makes the three items above expressible at all: a single schema serving both directions
+could not say that <code>ipaddr</code> is readable but not writable, or that <code>tag</code> accepts one shape and
+returns another.</p>
+<p>Regenerated clients get new model names for every resource.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/migration-v2-to-v3.md</code> at tag <code>v3.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/migration-v2-to-v3.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

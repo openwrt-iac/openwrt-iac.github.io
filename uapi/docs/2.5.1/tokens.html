@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tokens and scopes - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Tokens and scopes</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="tokens-and-scopes">Tokens and scopes</h1>
+<p>uapi authenticates every request (except <code>/healthz</code>, <code>/openapi.json</code>, and
+<code>/schema/*</code>) with a bearer token. Tokens are created on the router (or
+over HTTP once a token with <code>uapi:tokens:rw</code> exists), hashed at rest, and
+authorized against a hierarchical scope tree.</p>
+<h2 id="creating-tokens-cli">Creating tokens (CLI)</h2>
+<pre><code class="language-sh">uapi-token create --name &lt;label&gt; --scope &lt;scope&gt; [--scope &lt;scope&gt;...] \
+                  [--expires-in &lt;N&gt;[smhd]] [--allowed-cidr &lt;CIDR&gt;...] \
+                  [--force]
+</code></pre>
+<ul>
+<li><code>--name</code>: human-readable label. Must be unique. Must match <code>[A-Za-z0-9_]+</code> (uci section-name charset; use underscores instead of hyphens). Surfaces in the audit log on every authed request.</li>
+<li><code>--scope</code>: at least one. May repeat. Validated against the known scope tree (see below); <code>--force</code> bypasses.</li>
+<li><code>--expires-in</code>: optional duration. Suffix is one of <code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>. The token returns <code>401 invalid_token</code> with <code>message: "Token expired"</code> after the deadline passes.</li>
+<li><code>--allowed-cidr</code>: optional source-IP allowlist (IPv4 CIDRs only; may repeat). When set, the token returns <code>401 invalid_token</code> with <code>message: "Source IP not permitted for this token"</code> from any other source. Bad CIDR shape rejected at mint time.</li>
+<li>Output (stdout): the cleartext bearer string, exactly once. Stderr explains it's the only chance to capture it.</li>
+</ul>
+<p>The router stores only the salt + <code>sha256(salt + ":" + bearer)</code>. The cleartext cannot be recovered.</p>
+<p>The token store is re-read from <code>/etc/config/uapi</code> on every request (uci read is millisecond-scale; the fork-per-request model means no cross-request cache anyway). Newly created tokens take effect immediately; no <code>uhttpd reload</code> is needed.</p>
+<pre><code class="language-sh">uapi-token list             # short summary: name, scopes, expiry (if set), allowed_cidrs (if set)
+uapi-token show &lt;name&gt;      # detailed view (scopes, expiry, cidrs, last_used_at/ip; no secret)
+uapi-token revoke &lt;name&gt;    # delete a token
+</code></pre>
+<h2 id="creating-tokens-http">Creating tokens (HTTP)</h2>
+<p>A token holding <code>uapi:tokens:rw</code> (or <code>*:rw</code>) can mint other tokens over the
+wire:</p>
+<pre><code class="language-sh">curl -H &quot;Authorization: Bearer $ADMIN&quot; -H 'Content-Type: application/json' \
+     -X POST https://router/api/v2/tokens \
+     -d '{
+       &quot;name&quot;: &quot;ci_bot&quot;,
+       &quot;scopes&quot;: [&quot;firewall:rules:rw&quot;],
+       &quot;expires_in_seconds&quot;: 3600,
+       &quot;allowed_cidrs&quot;: [&quot;10.0.0.0/24&quot;]
+     }'
+# response: { &quot;bearer&quot;: &quot;&lt;cleartext-once&gt;&quot;, &quot;name&quot;: &quot;ci_bot&quot; }
+</code></pre>
+<p>The requested scopes must be a strict subset of the caller's. Escalation
+returns <code>403 scope_escalation_blocked</code>. The same request with a name
+that's already in use returns <code>409 conflict</code>.</p>
+<pre><code class="language-sh">curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v2/tokens
+curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v2/tokens/ci_bot
+curl -H &quot;Authorization: Bearer $ADMIN&quot; -X DELETE https://router/api/v2/tokens/ci_bot
+</code></pre>
+<p>GET responses never include <code>salt</code> or <code>hash</code>.</p>
+<h2 id="inspecting-the-current-token">Inspecting the current token</h2>
+<pre><code class="language-sh">curl -H &quot;Authorization: Bearer $TOKEN&quot; https://router/api/v2/auth/whoami
+</code></pre>
+<p>Returns <code>{token_id, scopes, source_ip, expires_at, allowed_cidrs,
+last_used_at, last_used_ip}</code>. No scope check (any authed token can read
+its own metadata).</p>
+<h2 id="using-a-token">Using a token</h2>
+<pre><code>Authorization: Bearer &lt;bearer string&gt;
+</code></pre>
+<p>Common failure responses:</p>
+<table>
+<thead>
+<tr>
+<th>HTTP</th>
+<th>code</th>
+<th>Cause</th>
+<th>Header</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>401</td>
+<td><code>unauthorized</code></td>
+<td>missing or malformed Authorization header</td>
+<td><code>WWW-Authenticate: Bearer</code></td>
+</tr>
+<tr>
+<td>401</td>
+<td><code>invalid_token</code></td>
+<td>bearer not in store, or expired, or wrong source IP</td>
+<td><code>WWW-Authenticate: Bearer</code></td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>insufficient_scope</code></td>
+<td>token's scopes don't cover the request</td>
+<td>-</td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>scope_escalation_blocked</code></td>
+<td><code>POST /tokens</code> requested scopes outside caller's</td>
+<td>-</td>
+</tr>
+<tr>
+<td>429</td>
+<td><code>too_many_requests</code></td>
+<td>per-token rate limit exceeded</td>
+<td><code>Retry-After: &lt;seconds&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="scope-syntax">Scope syntax</h2>
+<pre><code>&lt;segment&gt;[:&lt;segment&gt;...]:(rw|ro)
+</code></pre>
+<p>Up to three segments (<code>&lt;domain&gt;:&lt;subresource&gt;:&lt;verb&gt;</code> for curated,
+<code>raw:&lt;package&gt;:&lt;verb&gt;</code> for raw). <code>rw</code> implies <code>ro</code>. <code>*</code> is allowed as any
+segment for wildcards:</p>
+<ul>
+<li><code>*:rw</code> / <code>*:ro</code> - top-level wildcard, matches everything.</li>
+<li><code>firewall:*:ro</code> - mid-tree wildcard, matches every firewall subresource (rules, zones, redirects, forwardings, defaults) but NOT the bare domain.</li>
+<li><code>*:rules:ro</code> - also valid; matches the <code>rules</code> subresource of every domain that has one.</li>
+</ul>
+<p>At equal depth, an exact segment beats a wildcard segment
+(<code>firewall:rules:rw</code> wins over <code>firewall:*:ro</code> for <code>/firewall/rules</code>).</p>
+<h2 id="scope-tree">Scope tree</h2>
+<p>The authoritative source is <code>src/lib/scope.uc</code> <code>KNOWN_PATHS</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Domain</th>
+<th>Subresources</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*</code></td>
+<td>any</td>
+</tr>
+<tr>
+<td><code>network</code></td>
+<td><code>interfaces</code>, <code>devices</code>, <code>routes</code>, <code>rules</code>, <code>bridge_vlans</code>, <code>wireguard_peers</code></td>
+</tr>
+<tr>
+<td><code>wireless</code></td>
+<td><code>devices</code>, <code>interfaces</code></td>
+</tr>
+<tr>
+<td><code>firewall</code></td>
+<td><code>zones</code>, <code>rules</code>, <code>redirects</code>, <code>nat</code>, <code>forwardings</code>, <code>defaults</code></td>
+</tr>
+<tr>
+<td><code>dhcp</code></td>
+<td><code>hosts</code>, <code>leases</code>, <code>leases6</code>, <code>servers</code>, <code>dnsmasq</code>, <code>odhcpd</code></td>
+</tr>
+<tr>
+<td><code>system</code></td>
+<td>(singleton), <code>timeservers</code>, <code>password</code>, <code>authorized_keys</code></td>
+</tr>
+<tr>
+<td><code>dropbear</code></td>
+<td><code>instances</code></td>
+</tr>
+<tr>
+<td><code>uhttpd</code></td>
+<td><code>instances</code>, <code>certs</code></td>
+</tr>
+<tr>
+<td><code>unbound</code></td>
+<td><code>server</code></td>
+</tr>
+<tr>
+<td><code>sqm</code></td>
+<td><code>queues</code></td>
+</tr>
+<tr>
+<td><code>snmpd</code></td>
+<td><code>agents</code>, <code>com2secs</code>, <code>groups</code>, <code>accesses</code>, <code>system</code></td>
+</tr>
+<tr>
+<td><code>lldpd</code></td>
+<td><code>config</code></td>
+</tr>
+<tr>
+<td><code>prometheus_node_exporter_lua</code></td>
+<td><code>config</code></td>
+</tr>
+<tr>
+<td><code>vnstat</code></td>
+<td><code>config</code>, <code>interfaces</code></td>
+</tr>
+<tr>
+<td><code>packages</code></td>
+<td><code>installed</code>, <code>feeds</code></td>
+</tr>
+<tr>
+<td><code>uapi</code></td>
+<td><code>tokens</code>, <code>metrics</code>, <code>diagnostics</code></td>
+</tr>
+<tr>
+<td><code>raw</code></td>
+<td><code>&lt;any-package&gt;</code> (composes with the curated domain tree)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="deepest-match-wins">Deepest-match-wins</h2>
+<p>When multiple scopes match a request, the one with the longest matching
+prefix decides. <code>rw</code> and <code>ro</code> at the same depth: <code>rw</code> wins.</p>
+<p>Examples (assume the request targets <code>/firewall/rules/r_01HX...</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Token scopes</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*:rw</code></td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:rw</code></td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:rules:rw</code></td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:zones:rw</code></td>
+<td>denies</td>
+</tr>
+<tr>
+<td><code>*:rw</code>, <code>firewall:rules:ro</code> (PUT)</td>
+<td><strong>denies</strong> (deepest match is <code>ro</code>)</td>
+</tr>
+<tr>
+<td><code>*:rw</code>, <code>firewall:rules:ro</code> (GET)</td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:ro</code>, <code>firewall:rules:rw</code> (PUT)</td>
+<td>permits (deeper <code>rw</code> wins)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="raw-access-composition">Raw access composition</h2>
+<p><code>/raw/&lt;package&gt;/&lt;id&gt;</code> requires <strong>both</strong> trees to permit, independently:</p>
+<ol>
+<li>The raw tree: <code>raw</code> / <code>raw:&lt;package&gt;</code> matches.</li>
+<li>The domain tree: evaluated against the section's actual type. <code>firewall.rule</code> -&gt; <code>firewall:rules</code>, <code>network.interface</code> -&gt; <code>network:interfaces</code>, etc.</li>
+</ol>
+<p>A token with <code>raw:rw</code> but only <code>firewall:rules:ro</code> can read firewall rules
+via <code>/raw/firewall/...</code> but cannot write them. The domain-tree override
+always wins. This is intentional: granting <code>raw:rw</code> should not be a
+backdoor around carefully-crafted curated scopes.</p>
+<p>For packages outside the curated set, the domain check uses
+<code>[&lt;package&gt;]</code>. Granting <code>*:rw</code> or that specific package scope covers it.</p>
+<h2 id="per-token-rate-limit">Per-token rate limit</h2>
+<p>Tokens carry optional <code>rate</code> (requests/second) and <code>burst</code> (token-bucket capacity) overrides that beat the global rate-limit default (100 req/s, burst 200). Absent options inherit the global.</p>
+<p>Set at mint time via CLI:</p>
+<pre><code class="language-sh">uapi-token create --name ci_bot --scope '*:rw' --rate 10 --burst 20
+</code></pre>
+<p>Or via HTTP:</p>
+<pre><code class="language-sh">curl -H &quot;Authorization: Bearer $ADMIN&quot; -H 'Content-Type: application/json' \
+     -X POST https://router/api/v2/tokens \
+     -d '{
+       &quot;name&quot;: &quot;ci_bot&quot;,
+       &quot;scopes&quot;: [&quot;firewall:rules:rw&quot;],
+       &quot;rate&quot;: 10,
+       &quot;burst&quot;: 20
+     }'
+</code></pre>
+<p>Both values must be positive integers; non-positive or non-integer values return <code>422 validation_failed</code>. The uci options on the token's section are <code>option rate '&lt;N&gt;'</code> and <code>option burst '&lt;N&gt;'</code>; setting them directly via <code>uci set</code> is also supported and takes effect on the next request.</p>
+<h2 id="recommended-token-shapes">Recommended token shapes</h2>
+<table>
+<thead>
+<tr>
+<th>Use case</th>
+<th>Scopes</th>
+<th>Flags</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Terraform admin</td>
+<td><code>*:rw</code></td>
+<td><code>--expires-in 90d</code></td>
+</tr>
+<tr>
+<td>Terraform per-domain</td>
+<td><code>firewall:rw</code></td>
+<td><code>--expires-in 90d</code></td>
+</tr>
+<tr>
+<td>Read-only dashboard</td>
+<td><code>*:ro</code></td>
+<td><code>--allowed-cidr &lt;office&gt;</code></td>
+</tr>
+<tr>
+<td>Monitoring (Prometheus scrape)</td>
+<td><code>uapi:metrics:ro</code>, <code>uapi:diagnostics:ro</code></td>
+<td><code>--allowed-cidr &lt;prom-host&gt;/32</code></td>
+</tr>
+<tr>
+<td>Short-lived CI job</td>
+<td><code>firewall:rules:rw</code>, <code>network:routes:rw</code></td>
+<td><code>--expires-in 1h --allowed-cidr &lt;ci&gt;</code></td>
+</tr>
+<tr>
+<td>Operator that mints other tokens</td>
+<td><code>uapi:tokens:rw</code>, plus the scopes it needs to delegate</td>
+<td><code>--expires-in 30d</code></td>
+</tr>
+<tr>
+<td>Long-tail via <code>/raw/</code></td>
+<td><code>*:rw</code> (or <code>raw:rw</code> + the specific domain scopes)</td>
+<td>-</td>
+</tr>
+</tbody>
+</table>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/tokens.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/tokens.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

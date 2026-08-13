@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tokens and scopes - uapi 1.2.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 1.2.1 / Tokens and scopes</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="tokens-and-scopes">Tokens and scopes</h1>
+<p>uapi authenticates every request (except <code>/healthz</code> and <code>/openapi.json</code>) with a bearer token. Tokens are created locally on the router, hashed at rest, and authorized against a hierarchical scope tree.</p>
+<h2 id="creating-tokens">Creating tokens</h2>
+<p>Local CLI only. No HTTP login endpoint, no rpcd sessions.</p>
+<pre><code class="language-sh">uapi-token create --name &lt;label&gt; --scope &lt;scope&gt; [--scope &lt;scope&gt;...] [--force]
+</code></pre>
+<ul>
+<li><code>--name</code>: human-readable label. Must be unique. Surfaces in the audit log when this token performs a write.</li>
+<li><code>--scope</code>: at least one. May repeat. Validated against the known scope tree below; use <code>--force</code> to bypass (e.g. for forward-compatibility with a future endpoint).</li>
+<li>Output (stdout): the cleartext bearer string, exactly once. Stderr explains it's the only chance to capture it.</li>
+</ul>
+<p>The router stores only the salt + <code>sha256(salt + ":" + bearer)</code>. The cleartext cannot be recovered.</p>
+<pre><code class="language-sh">uapi-token list             # short summary of all tokens
+uapi-token show &lt;name&gt;      # detailed view (scopes, no secret)
+uapi-token revoke &lt;name&gt;    # delete a token
+</code></pre>
+<h2 id="using-a-token">Using a token</h2>
+<pre><code>Authorization: Bearer &lt;bearer string&gt;
+</code></pre>
+<p>Failures:</p>
+<ul>
+<li>Missing or malformed header: <code>401 unauthorized</code></li>
+<li>Bearer not in the store: <code>401 invalid_token</code></li>
+<li>Valid token but scopes don't cover the request: <code>403 insufficient_scope</code></li>
+</ul>
+<h2 id="scope-syntax">Scope syntax</h2>
+<pre><code>&lt;segment&gt;[:&lt;segment&gt;...]:(rw|ro)
+</code></pre>
+<p>Two-segment depth max in v1. <code>rw</code> implies <code>ro</code>. <code>*</code> is allowed as any segment for wildcards:</p>
+<ul>
+<li><code>*:rw</code> / <code>*:ro</code>: top-level wildcard, matches everything.</li>
+<li><code>firewall:*:ro</code>: mid-tree wildcard, matches every firewall subresource (rules, zones, redirects) but NOT the bare domain.</li>
+<li><code>*:rules:ro</code>: also valid; matches the <code>rules</code> subresource of every domain that has one.</li>
+</ul>
+<p>At equal depth, an exact segment beats a wildcard segment (<code>firewall:rules:rw</code> wins over <code>firewall:*:ro</code> for <code>/firewall/rules</code>).</p>
+<h2 id="the-v1-scope-tree">The v1 scope tree</h2>
+<table>
+<thead>
+<tr>
+<th>Scope</th>
+<th>Covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*:rw</code> / <code>*:ro</code></td>
+<td>Everything. Use sparingly.</td>
+</tr>
+<tr>
+<td><code>network:rw</code></td>
+<td>All <code>/network/...</code> endpoints</td>
+</tr>
+<tr>
+<td><code>network:interfaces:rw</code></td>
+<td>Just <code>/network/interfaces</code></td>
+</tr>
+<tr>
+<td><code>network:devices:rw</code></td>
+<td>Just <code>/network/devices</code></td>
+</tr>
+<tr>
+<td><code>wireless:rw</code></td>
+<td>All <code>/wireless/...</code> endpoints</td>
+</tr>
+<tr>
+<td><code>wireless:devices:rw</code></td>
+<td>Just <code>/wireless/devices</code></td>
+</tr>
+<tr>
+<td><code>wireless:interfaces:rw</code></td>
+<td>Just <code>/wireless/interfaces</code></td>
+</tr>
+<tr>
+<td><code>firewall:rw</code></td>
+<td>All <code>/firewall/...</code> endpoints</td>
+</tr>
+<tr>
+<td><code>firewall:zones:rw</code></td>
+<td>Just <code>/firewall/zones</code></td>
+</tr>
+<tr>
+<td><code>firewall:rules:rw</code></td>
+<td>Just <code>/firewall/rules</code></td>
+</tr>
+<tr>
+<td><code>firewall:redirects:rw</code></td>
+<td>Just <code>/firewall/redirects</code></td>
+</tr>
+<tr>
+<td><code>dhcp:rw</code></td>
+<td>All <code>/dhcp/...</code> endpoints</td>
+</tr>
+<tr>
+<td><code>dhcp:hosts:rw</code></td>
+<td>Just <code>/dhcp/hosts</code></td>
+</tr>
+<tr>
+<td><code>dhcp:leases:ro</code></td>
+<td>Just <code>/dhcp/leases</code> (read-only resource)</td>
+</tr>
+<tr>
+<td><code>system:rw</code></td>
+<td><code>/system</code></td>
+</tr>
+<tr>
+<td><code>raw:rw</code></td>
+<td><code>/raw/&lt;any-package&gt;/...</code> (plus domain)</td>
+</tr>
+<tr>
+<td><code>raw:&lt;pkg&gt;:rw</code></td>
+<td><code>/raw/&lt;pkg&gt;/...</code> only (plus domain)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="deepest-match-wins">Deepest-match-wins</h2>
+<p>When multiple scopes match a request, the one with the longest matching prefix decides. <code>rw</code> and <code>ro</code> at the same depth: <code>rw</code> wins.</p>
+<p>Examples (assume the request targets <code>/firewall/rules/r_01HX...</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Token scopes</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*:rw</code></td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:rw</code></td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:rules:rw</code></td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:zones:rw</code></td>
+<td>denies</td>
+</tr>
+<tr>
+<td><code>*:rw</code>, <code>firewall:rules:ro</code> (PUT)</td>
+<td><strong>denies</strong> (deepest match is <code>ro</code>)</td>
+</tr>
+<tr>
+<td><code>*:rw</code>, <code>firewall:rules:ro</code> (GET)</td>
+<td>permits</td>
+</tr>
+<tr>
+<td><code>firewall:ro</code>, <code>firewall:rules:rw</code> (PUT)</td>
+<td>permits  (deeper rw wins)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="raw-access-composition">Raw access composition</h2>
+<p><code>/raw/&lt;package&gt;/&lt;id&gt;</code> requires <strong>both</strong> trees to permit, independently:</p>
+<ol>
+<li>The raw tree: <code>raw</code> / <code>raw:&lt;package&gt;</code> matches.</li>
+<li>The domain tree: evaluated against the section's actual type. <code>firewall.rule</code> -&gt; <code>firewall:rules</code>, <code>network.interface</code> -&gt; <code>network:interfaces</code>, etc.</li>
+</ol>
+<p>So a token with <code>raw:rw</code> but <code>firewall:rules:ro</code> can read firewall rules via <code>/raw/firewall/...</code> but cannot write them. The domain-tree override always wins. This is intentional: granting <code>raw:rw</code> should not be a backdoor around carefully-crafted curated scopes.</p>
+<p>For packages outside the curated set, the domain check uses <code>[&lt;package&gt;]</code>. Granting <code>*:rw</code> or that specific package scope covers it.</p>
+<h2 id="recommended-token-shapes-for-common-use-cases">Recommended token shapes for common use cases</h2>
+<table>
+<thead>
+<tr>
+<th>Use case</th>
+<th>Scopes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Terraform admin</td>
+<td><code>*:rw</code></td>
+</tr>
+<tr>
+<td>Terraform per-domain (firewall)</td>
+<td><code>firewall:rw</code></td>
+</tr>
+<tr>
+<td>Monitoring (read-only)</td>
+<td><code>*:ro</code></td>
+</tr>
+<tr>
+<td>Long-tail config via <code>/raw/</code></td>
+<td><code>*:rw</code> (or scope to specific packages)</td>
+</tr>
+</tbody>
+</table>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/tokens.md</code> at tag <code>v1.2.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v1.2.1/docs/tokens.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

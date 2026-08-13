@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Migrating from uapi v1 to v2 - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Migrating from uapi v1 to v2</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="migrating-from-uapi-v1-to-v2">Migrating from uapi v1 to v2</h1>
+<p>v2 is a single, deliberate breaking release. The cost is paid once; the
+payoff is a wire surface that is consistent (snake_case across the board),
+strictly typed (real JSON integers everywhere), and significantly larger
+(rate limit, metrics, idempotency, batch, JSON Patch, per-resource ETags +
+<code>If-Match</code>, token expiry / IP scoping / HTTP rotation, conditional GET,
+diagnostics).</p>
+<p>A given uapi installation now serves exactly one API major - there is no
+parallel <code>/api/v1/</code> and <code>/api/v2/</code> mount in the same binary. Operators who
+need to keep a v1 client working keep the <code>1.2.1</code> package installed. The
+1.2.1 APK is preserved on the v1.2.1 GitHub Release at
+<a href="https://github.com/openwrt-iac/uapi/releases/tag/v1.2.1">https://github.com/openwrt-iac/uapi/releases/tag/v1.2.1</a>; the signed
+<code>v1.2.1</code> git tag is the canonical v1 contract document.</p>
+<p><strong>The URL prefix changes from <code>/api/v1/</code> to <code>/api/v2/</code>.</strong> Update every
+client-side base URL accordingly. The install hook on a fresh <code>apk add
+uapi</code> over v1.2.x automatically removes the v1 prefix from uhttpd's
+<code>ucode_prefix</code> list and adds the v2 one.</p>
+<h2 id="upgrade-path">Upgrade path</h2>
+<ol>
+<li><strong>Read this document end-to-end before installing v2.</strong> Specifically the
+   "Field renames", "Strict integer typing", and "Strictness sweep" sections -
+   those break the wire.</li>
+<li>Update your client code (Terraform provider, scripts, dashboards) to the
+   v2 expectations. Test against a staging router.</li>
+<li><code>apk upgrade uapi</code>. The install hook will <code>uhttpd reload</code> automatically;
+   existing tokens in <code>/etc/config/uapi</code> are preserved (the file is a conffile).</li>
+<li>Verify <code>GET /api/v2/healthz</code> returns <code>{"status":"ok", "version":"2.0.0", ...}</code>.
+   The new URL prefix is <code>/api/v2/</code>; the install hook handles the uhttpd
+   prefix migration. v1 clients hitting <code>/api/v1/</code> get a 404 from uhttpd
+   because the old prefix is no longer registered (this is intentional - the
+   wire contract changed; the URL should not silently lie about that).</li>
+</ol>
+<p>If anything looks wrong in production, <code>apk downgrade uapi=1.2.1</code> restores v1
+behavior (the v1.2.1 APK stays available on the feed for this exact reason).</p>
+<h2 id="field-renames-breaking">Field renames (Breaking)</h2>
+<p>The v1.x curated layer accumulated 16 fields in three resources that used
+upstream uci's casing instead of snake_case. v2 fixes them.</p>
+<h3 id="dropbearinstances"><code>dropbear/instances</code></h3>
+<table>
+<thead>
+<tr>
+<th>v1 field</th>
+<th>v2 field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Port</code></td>
+<td><code>port</code></td>
+</tr>
+<tr>
+<td><code>PasswordAuth</code></td>
+<td><code>password_auth</code></td>
+</tr>
+<tr>
+<td><code>RootPasswordAuth</code></td>
+<td><code>root_password_auth</code></td>
+</tr>
+<tr>
+<td><code>RootLogin</code></td>
+<td><code>root_login</code></td>
+</tr>
+<tr>
+<td><code>BannerFile</code></td>
+<td><code>banner_file</code></td>
+</tr>
+<tr>
+<td><code>Interface</code></td>
+<td><code>interface</code></td>
+</tr>
+<tr>
+<td><code>GatewayPorts</code></td>
+<td><code>gateway_ports</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="snmpdsystem"><code>snmpd/system</code></h3>
+<table>
+<thead>
+<tr>
+<th>v1 field</th>
+<th>v2 field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sysLocation</code></td>
+<td><code>sys_location</code></td>
+</tr>
+<tr>
+<td><code>sysContact</code></td>
+<td><code>sys_contact</code></td>
+</tr>
+<tr>
+<td><code>sysName</code></td>
+<td><code>sys_name</code></td>
+</tr>
+<tr>
+<td><code>sysServices</code></td>
+<td><code>sys_services</code></td>
+</tr>
+<tr>
+<td><code>sysDescr</code></td>
+<td><code>sys_descr</code></td>
+</tr>
+<tr>
+<td><code>sysObjectID</code></td>
+<td><code>sys_object_id</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="vnstatconfig"><code>vnstat/config</code></h3>
+<table>
+<thead>
+<tr>
+<th>v1 field</th>
+<th>v2 field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DatabaseDir</code></td>
+<td><code>database_dir</code></td>
+</tr>
+<tr>
+<td><code>Interface5MinHours</code></td>
+<td><code>interface_5min_hours</code></td>
+</tr>
+<tr>
+<td><code>MonthRotate</code></td>
+<td><code>month_rotate</code></td>
+</tr>
+</tbody>
+</table>
+<p>On disk, the uci keys are unchanged (<code>Port</code>, <code>sysLocation</code>, etc.). The rename
+is purely on the wire: <code>fromUci</code> exposes snake_case; <code>toUci</code> translates back
+to the upstream uci key.</p>
+<h3 id="dhcpservers-runtime-block"><code>dhcp/servers</code> runtime block</h3>
+<table>
+<thead>
+<tr>
+<th>v1 field</th>
+<th>v2 field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>runtime.active_leases_v4_total</code></td>
+<td><code>runtime.active_leases_v4_box_total</code></td>
+</tr>
+</tbody>
+</table>
+<p>The counter is box-wide, not per-server: dnsmasq's <code>/tmp/dhcp.leases</code> does
+not tag entries by interface, so every dhcp/servers section's runtime block
+reports the same total. The new name says so explicitly. The IPv6 counter
+(<code>active_leases_v6_iface</code>) is genuinely per-interface and was unaffected.</p>
+<h3 id="wire-surface-renames-in-v200-rc4">Wire-surface renames in v2.0.0-rc4</h3>
+<p>Three top-level field renames driven by Terraform / HCL keyword
+collisions. uci option names on disk are unchanged; only the JSON
+surface renames.</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>v2.0.0-rc3 field</th>
+<th>v2.0.0-rc4 field</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mwan3/interfaces</code></td>
+<td><code>count</code></td>
+<td><code>probe_count</code></td>
+<td><code>count</code> is a Terraform reserved meta-argument; the provider cannot declare it as a top-level attribute.</td>
+</tr>
+<tr>
+<td><code>firewall/zones</code></td>
+<td><code>output</code></td>
+<td><code>output_policy</code></td>
+<td><code>output</code> is an HCL block keyword and reads funny as a Terraform attribute.</td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code></td>
+<td><code>output</code></td>
+<td><code>output_policy</code></td>
+<td>Same.</td>
+</tr>
+<tr>
+<td><code>unbound/server</code></td>
+<td><code>resource</code></td>
+<td><code>resource_limits</code></td>
+<td><code>resource</code> is an HCL block keyword. <code>resource_limits</code> matches the field's semantic (a memory/cache sizing preset).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="networkinterfaces-runtime-address-keys-rc4"><code>network/interfaces</code> runtime address keys (rc4)</h3>
+<p>ubus emits the address-set keys as hyphenated identifiers
+(<code>ipv4-address</code>, <code>ipv6-address</code>, <code>ipv6-prefix</code>); these were the only
+hyphenated identifiers anywhere in the API surface. Renamed to
+<code>ipv4_address</code>, <code>ipv6_address</code>, <code>ipv6_prefix</code> so every key is a legal
+struct field tag / HCL identifier without quoting. The runtime block
+is computed (clients ignore it for drift detection) so the rename
+costs nothing on disk; only the wire surface changed.</p>
+<h2 id="strict-integer-typing-breaking">Strict integer typing (Breaking)</h2>
+<p>v1.x silently accepted string-form integers (<code>"42"</code>) for fields declared
+<code>type: "integer"</code>. The toUci layer happily stringified them again on the way
+back to uci, but the type check was a lie: a client that sent <code>"forty-two"</code>
+would also be accepted, with <code>int("forty-two") = 0</code> silently dropped into
+uci. v2 closes the trap.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>v1 behavior</th>
+<th>v2 behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Wire</td>
+<td><code>"42"</code> accepted; <code>42</code> accepted; <code>"forty-two"</code> accepted (silently → 0)</td>
+<td>only real integers <code>42</code> accepted; everything else → <code>422 validation_failed</code></td>
+</tr>
+<tr>
+<td><code>fromUci</code></td>
+<td><code>int(s)</code> (returns 0 on garbage)</td>
+<td><code>values.as_int(s)</code> (returns <code>null</code> on garbage; surfaces real ints as JSON numbers)</td>
+</tr>
+<tr>
+<td><code>toUci</code></td>
+<td><code>"" + n</code> for any value</td>
+<td><code>"" + n</code> only for validated integers</td>
+</tr>
+</tbody>
+</table>
+<p>This affects every field declared with <code>type: "integer"</code> in v2's
+<code>schema_properties</code> - at v2 launch this is ~80 fields across ~20 resources.
+The most common-to-touch ones:</p>
+<ul>
+<li><code>network/routes</code>: <code>metric</code>, <code>mtu</code>, <code>table</code></li>
+<li><code>dropbear/instances</code>: <code>port</code></li>
+<li><code>dhcp/servers</code>: <code>start</code>, <code>limit</code> (<code>leasetime</code> stays a duration string;
+  port specs like <code>firewall/rules.match.dest_port[]</code> also stay strings to
+  preserve range syntax <code>"22-25"</code> - check <code>/schema/&lt;pkg&gt;/&lt;res&gt;</code> for the
+  authoritative type per field)</li>
+<li><code>system</code>: <code>log_size</code>, <code>log_remote_port</code></li>
+</ul>
+<p>Run your client through a staging router and capture any 422 responses on
+PATCH/PUT to find the call sites that need updating.</p>
+<h2 id="strictness-sweep-breaking-mechanical">Strictness sweep (Breaking, mechanical)</h2>
+<p>Some v1.x fields had no <code>schema_properties</code> entry at all and reached <code>toUci</code>
+unfiltered. v2's completeness sweep added typed entries for every
+fromUci-surfaced field. Bodies that previously slipped past the type check
+(silent drops) now return <code>422 validation_failed</code>.</p>
+<p>If you have wire traffic that was relying on a field being silently dropped
+(unlikely but possible), the 422 will tell you which field. The fix is to
+either remove the field from the payload or correct its type.</p>
+<h2 id="new-endpoints">New endpoints</h2>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Scope</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /healthz</code> (extended body)</td>
+<td>(public)</td>
+<td>Now includes <code>checks: { ubus, uci, ... }</code></td>
+</tr>
+<tr>
+<td><code>GET /schema</code></td>
+<td>(public)</td>
+<td>Lists all resources</td>
+</tr>
+<tr>
+<td><code>GET /schema/&lt;package&gt;</code></td>
+<td>(public)</td>
+<td>Schemas for one package</td>
+</tr>
+<tr>
+<td><code>GET /schema/&lt;package&gt;/&lt;res&gt;</code></td>
+<td>(public)</td>
+<td>One resource's <code>schema_properties</code></td>
+</tr>
+<tr>
+<td><code>GET /auth/whoami</code></td>
+<td>(any authed token)</td>
+<td>Current token metadata</td>
+</tr>
+<tr>
+<td><code>GET /tokens</code></td>
+<td><code>uapi:tokens:ro</code> / <code>*:ro</code></td>
+<td>List tokens (no secrets surfaced)</td>
+</tr>
+<tr>
+<td><code>GET /tokens/&lt;id&gt;</code></td>
+<td><code>uapi:tokens:ro</code> / <code>*:ro</code></td>
+<td>One token's metadata</td>
+</tr>
+<tr>
+<td><code>POST /tokens</code></td>
+<td><code>uapi:tokens:rw</code> / <code>*:rw</code></td>
+<td>Mint a new bearer (returns cleartext once)</td>
+</tr>
+<tr>
+<td><code>DELETE /tokens/&lt;id&gt;</code></td>
+<td><code>uapi:tokens:rw</code> / <code>*:rw</code></td>
+<td>Revoke</td>
+</tr>
+<tr>
+<td><code>GET /metrics</code></td>
+<td><code>uapi:metrics:ro</code> / <code>*:ro</code></td>
+<td>Prometheus text</td>
+</tr>
+<tr>
+<td><code>GET /diagnostics</code></td>
+<td><code>uapi:diagnostics:ro</code> / <code>*:rw</code></td>
+<td>Version + lock state + recent errors</td>
+</tr>
+<tr>
+<td><code>POST /batch</code></td>
+<td>each sub-request scope-checked</td>
+<td>Multi-package all-or-nothing</td>
+</tr>
+</tbody>
+</table>
+<h2 id="new-headers">New headers</h2>
+<ul>
+<li><strong>Requests recognized:</strong> <code>X-Request-Id</code> (or <code>?request_id=</code>),
+  <code>If-None-Match</code> (or <code>?if_none_match=</code>),
+  <code>Idempotency-Key</code> (or <code>?idempotency_key=</code>),
+  <code>Content-Type: application/json-patch+json</code> (PATCH only, selects RFC 6902).</li>
+<li><strong>Responses emitted:</strong> <code>Link: &lt;...&gt;; rel="next"</code>, <code>X-Next-Cursor</code>,
+  <code>WWW-Authenticate: Bearer realm="uapi"</code> (on 401), <code>Retry-After</code> (on 429),
+  <code>Idempotent-Replayed: true</code> (on idempotency cache hits).</li>
+</ul>
+<h2 id="new-error-codes">New error codes</h2>
+<table>
+<thead>
+<tr>
+<th>HTTP</th>
+<th>code</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>invalid_cursor</code></td>
+<td>malformed <code>?cursor=</code></td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>scope_escalation_blocked</code></td>
+<td><code>POST /tokens</code> requested scopes beyond caller's</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>idempotency_key_conflict</code></td>
+<td>same key, different body</td>
+</tr>
+<tr>
+<td>429</td>
+<td><code>too_many_requests</code></td>
+<td>rate limit (default 100/s burst 200)</td>
+</tr>
+<tr>
+<td>4xx</td>
+<td><code>batch_partial_failure</code> (body)</td>
+<td><code>/batch</code> aborted; whole batch reverted</td>
+</tr>
+</tbody>
+</table>
+<p>Clients should already branch on HTTP status and treat unknown <code>code</code> values
+gracefully (per the v1 error envelope spec); new codes need no client work
+unless you want specific UX.</p>
+<h2 id="new-scopes">New scopes</h2>
+<p><code>uapi</code>, <code>uapi:tokens</code>, <code>uapi:metrics</code>, <code>uapi:diagnostics</code>. Wildcard <code>*:rw</code>
+continues to cover all of them; existing admin tokens require no change.</p>
+<h2 id="rate-limit-defaults">Rate limit defaults</h2>
+<p>100 req/sec, burst 200, per-token. Returns <code>429 too_many_requests</code> with
+<code>Retry-After</code>. Operators expecting more traffic add:</p>
+<pre><code>config ratelimit
+    option rate '500'
+    option burst '1000'
+</code></pre>
+<p>to <code>/etc/config/uapi</code>. No reload needed - the config is read on every authed
+request.</p>
+<h2 id="token-expiry-ip-scoping-and-http-rotation">Token expiry, IP scoping, and HTTP rotation</h2>
+<p>If you were rotating tokens via <code>uapi-token revoke</code> + <code>uapi-token create</code>,
+you can now do it over HTTP:</p>
+<pre><code class="language-sh">curl -H &quot;Authorization: Bearer $OLD&quot; -X POST https://router/api/v2/tokens \
+  -d '{ &quot;name&quot;: &quot;ci-rotated&quot;, &quot;scopes&quot;: [&quot;firewall:rw&quot;], &quot;expires_in_seconds&quot;: 86400 }'
+# response: { &quot;bearer&quot;: &quot;&lt;cleartext&gt;&quot;, &quot;name&quot;: &quot;ci-rotated&quot; }
+</code></pre>
+<p>The requested scopes must be a strict subset of the caller's. <code>expires_at</code>
+(epoch seconds) and <code>allowed_cidrs</code> are optional extensions to the same
+<code>uapi-token create</code> CLI.</p>
+<p>After expiry the token returns <code>401 invalid_token</code> with
+<code>message: "Token expired"</code>. Subsequent calls with a fresh bearer work
+immediately - the token store is re-read on every request.</p>
+<h2 id="idempotency-and-conditional-get">Idempotency and conditional GET</h2>
+<p>Two safe additions for Terraform-style and dashboard-style clients:</p>
+<ul>
+<li><strong>POST retries are no longer dangerous.</strong> Send <code>Idempotency-Key: &lt;client-uuid&gt;</code>
+  with each POST; if the network blips and you retry the same payload, you
+  get the original response back instead of a duplicate resource. uhttpd's
+  CGI env strips the header by default, so pass <code>?idempotency_key=&lt;id&gt;</code> as
+  fallback.</li>
+<li><strong>GET polling is cheaper.</strong> Send <code>If-None-Match: "&lt;previous-etag&gt;"</code>; you'll
+  get a <code>304 Not Modified</code> with no body when nothing changed. Same uhttpd
+  fallback as If-Match: <code>?if_none_match=&lt;etag&gt;</code>.</li>
+</ul>
+<h2 id="dependency-aware-etags-introduced-in-20-since-removed">Dependency-aware ETags (introduced in 2.0, since removed)</h2>
+<p>2.0 mixed a hash of every <code>firewall:zone</code> into the ETag of a <code>firewall/rules</code>
+GET, so changing a zone invalidated the rule's ETag. That was dropped again
+during the 2.x line, and this section described it as current until 2.5.0.
+the ETag helper in <code>src/lib/handler.uc</code> hashes the response body with
+<code>runtime</code> stripped and nothing else, so an ETag reflects only its own resource. Cross-resource
+consistency is enforced at <code>resource.validate()</code> time on every write instead;
+<code>docs/architecture.md</code> carries the current contract.</p>
+<p>Declared dependencies at v2.0 launch:</p>
+<ul>
+<li><code>firewall.rules</code>, <code>firewall.redirects</code>, <code>firewall.forwardings</code> → <code>firewall:zone</code></li>
+<li><code>sqm.queues</code>, <code>network.routes</code>, <code>dhcp.servers</code>, <code>network.wireguard_peers</code> → <code>network:interface</code></li>
+<li><code>network.bridge_vlans</code> → <code>network:device</code></li>
+</ul>
+<p>If your client was already correctly handling 412 on If-Match writes, this is
+strictly more accurate - no behavior change required.</p>
+<h2 id="things-that-did-not-change">Things that did NOT change</h2>
+<ul>
+<li>The atomic-transaction recipe (snapshot → validate → commit → reload →
+  restore on failure).</li>
+<li>The error envelope shape (<code>code</code>, <code>message</code>, <code>request_id</code>, optional <code>errors[]</code>).</li>
+<li>The bearer-token + scope-tree authn/authz model (scopes are additive; new
+  ones added, no existing ones renamed or removed).</li>
+<li>The <code>/api/v2/</code> URL prefix.</li>
+<li>The fork-per-request CGI execution model.</li>
+<li>The "no daemon of our own" architectural principle.</li>
+</ul>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/migration-v1-to-v2.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/migration-v1-to-v2.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

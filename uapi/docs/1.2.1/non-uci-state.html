@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Non-uci state: what uapi covers and what it doesn&#x27;t - uapi 1.2.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 1.2.1 / Non-uci state: what uapi covers and what it doesn&#x27;t</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="non-uci-state-what-uapi-covers-and-what-it-doesnt">Non-uci state: what uapi covers and what it doesn't</h1>
+<p>uapi's design contract is "uci is the source of truth". Almost every resource translates HTTP REST verbs into <code>uci_set</code> / <code>uci_commit</code> followed by a daemon reload. That model covers most of OpenWrt's configuration surface, but not all of it. This document inventories the small set of state that lives outside uci, in two categories:</p>
+<ol>
+<li><strong>In-scope, non-uci resources.</strong> Things uapi exposes anyway, with deliberately documented deviations from the standard transaction recipe.</li>
+<li><strong>Out-of-scope state.</strong> Things uapi explicitly does NOT cover, with the recommended out-of-band path for each.</li>
+</ol>
+<p>The bar for adding to category 1 is high. New non-uci resources should justify themselves against three questions: is the underlying daemon's uci surface genuinely missing this? would the right long-term fix be to add a uci option upstream rather than carry workaround state in uapi? does the resource fit a curated CRUD shape, or is it a one-shot action better handled by an operator tool?</p>
+<h2 id="in-scope-non-uci-resources">In-scope non-uci resources</h2>
+<p>The canonical registry (and the single-line table form) lives in <code>CLAUDE.md</code> under "Resource model" → "Non-uci resources". Each entry below expands on its lock semantics, audit shape, the file/process it touches, and why the standard uci-transaction recipe doesn't apply.</p>
+<h3 id="packagesinstalled"><code>packages/installed</code></h3>
+<ul>
+<li><strong>Source of truth.</strong> The apk database. Reads enumerate via <code>apk info --installed</code>; writes shell out to <code>apk add &lt;name&gt;</code> and <code>apk del &lt;name&gt;</code> via <code>fs.popen</code>.</li>
+<li><strong>Lock.</strong> <code>transaction.with_lock</code> on <code>/var/lock/uapi.lock</code>. apk has its own DB lock; the uapi flock serialises concurrent uapi requests so they don't race apk-vs-apk and surface as nondeterministic <code>5xx</code>s. Contention returns <code>423 locked</code> with <code>Retry-After: 1</code>.</li>
+<li><strong>Reload.</strong> None at the uapi layer. Each package's postinst runs as root and is responsible for wiring whatever the package installs (uci defaults, init scripts, etc.).</li>
+<li><strong>Validation.</strong> Package name must match <code>^[A-Za-z0-9_+][A-Za-z0-9_+.-]*$</code>. Names starting with <code>-</code> or <code>.</code> are rejected to prevent apk-flag injection (<code>--allow-untrusted</code>, <code>--repository=...</code>); the shell-out also uses <code>apk add -- &lt;name&gt;</code> as a defense-in-depth separator.</li>
+<li><strong>Audit.</strong> On failure, the full apk stderr is logged to syslog under the request id (<code>uapi-pkg-failure &lt;request_id&gt; action=install name="..." exit=&lt;n&gt; output="..."</code>). The HTTP response carries only a generic "apk add failed (exit N); see syslog <request_id>" message, so feed URLs with embedded credentials don't leak into client logs.</li>
+<li><strong>Why not uci.</strong> apk's installed-package set is a runtime database (<code>/var/lib/apk/...</code>), not a uci config. The right place to drive it is apk itself.</li>
+</ul>
+<h3 id="packagesfeeds"><code>packages/feeds</code></h3>
+<ul>
+<li><strong>Source of truth.</strong> Files under <code>/etc/apk/repositories.d/*.list</code>.</li>
+<li><strong>Lock.</strong> Same as <code>packages/installed</code>. After every write, <code>apk update</code> is invoked so the new feed is immediately available.</li>
+<li><strong>Reload.</strong> None; <code>apk update</code> IS the reload.</li>
+<li><strong>Validation.</strong> Feed name must match <code>^[A-Za-z0-9_][A-Za-z0-9_.-]*$</code> (no leading dot, no leading dash). URL must be <code>http://</code> or <code>https://</code>. <code>file://</code> and other schemes are rejected.</li>
+<li><strong>Why not uci.</strong> apk reads <code>/etc/apk/repositories.d/</code> directly. There is no uci wrapper for it upstream.</li>
+</ul>
+<h3 id="dhcpleases-read-only"><code>dhcp/leases</code> (read-only)</h3>
+<ul>
+<li><strong>Source of truth.</strong> <code>/tmp/dhcp.leases</code> (the dnsmasq lease dump).</li>
+<li><strong>Lock.</strong> None; reads only.</li>
+<li><strong>Format.</strong> Space-separated lines: <code>&lt;expires_at&gt; &lt;mac&gt; &lt;ip&gt; &lt;hostname&gt; &lt;duid?&gt;</code>.</li>
+<li><strong>Why not uci.</strong> Active leases are runtime state, by definition not in <code>/etc/config/</code>.</li>
+</ul>
+<h3 id="dhcpleases6-read-only"><code>dhcp/leases6</code> (read-only)</h3>
+<ul>
+<li><strong>Source of truth.</strong> <code>/tmp/hosts/odhcpd</code> (preferred) or <code>/tmp/odhcpd.leases</code> (older odhcpd versions).</li>
+<li><strong>Lock.</strong> None; reads only.</li>
+<li><strong>Format.</strong> Best-effort parser, one entry per assigned address: <code>&lt;duid&gt; &lt;iaid&gt; &lt;hostname&gt; &lt;expires_at&gt; &lt;interface&gt; &lt;IA_NA|IA_PD&gt; &lt;ip&gt;[/&lt;prefixlen&gt;] [&lt;ip2&gt; ...]</code>. Lines that don't match this shape are silently skipped. odhcpd's statefile format varies across versions; parser failure on a single line never breaks the read path for the rest.</li>
+<li><strong>Why not uci.</strong> Same as <code>dhcp/leases</code>; runtime state.</li>
+</ul>
+<h3 id="systempassword-write-only"><code>system/password</code> (write-only)</h3>
+<ul>
+<li><strong>Source of truth.</strong> <code>/etc/shadow</code>, via <code>passwd(1)</code>.</li>
+<li><strong>Lock.</strong> <code>transaction.with_lock</code>.</li>
+<li><strong>Mechanism.</strong> Shells out to <code>/bin/busybox passwd &lt;user&gt;</code> and pipes <code>&lt;pw&gt;\n&lt;pw&gt;\n</code> through stdin (the same recipe LuCI uses for its "Router Password" page).</li>
+<li><strong>Validation.</strong> <code>user</code> must match <code>^(root|[a-z][a-z0-9_-]*)$</code>. <code>password</code> must be at least 8 characters.</li>
+<li><strong>Audit.</strong> Successful sets emit <code>uapi-passwd-set &lt;request_id&gt; user="..."</code>. Failures emit <code>uapi-passwd-failure &lt;request_id&gt; user="..." exit=&lt;n&gt;</code>. The password VALUE is never logged.</li>
+<li><strong>HTTP shape.</strong> <code>POST /api/v1/system/password</code> returns <code>204</code>. There is no <code>GET</code> (password hashes don't leak through the API at all).</li>
+<li><strong>Why not uci.</strong> OpenWrt has no uci wrapper for local user credentials. Cloud-init / image-bake (uci-defaults dropping a <code>passwd -d root</code> line, etc.) is the alternative for purely offline provisioning.</li>
+</ul>
+<h3 id="systemauthorized_keys"><code>system/authorized_keys</code></h3>
+<ul>
+<li><strong>Source of truth.</strong> <code>/etc/dropbear/authorized_keys</code> (mode 0600).</li>
+<li><strong>Lock.</strong> <code>transaction.with_lock</code> for writes; reads are lock-free.</li>
+<li><strong>Mechanism.</strong> Direct file I/O. dropbear re-reads the file on every connection so no reload is needed.</li>
+<li><strong>Validation.</strong> Server-side parse of each key line as <code>&lt;type&gt; &lt;base64-blob&gt; [comment]</code>. Allowed types: <code>ssh-rsa</code>, <code>ssh-ed25519</code>, <code>ecdsa-sha2-nistp{256,384,521}</code>, <code>sk-ssh-ed25519@openssh.com</code>, <code>sk-ecdsa-sha2-nistp256@openssh.com</code>. Options blocks (<code>command="..."</code>, <code>no-pty</code>, etc.) before the key type are stripped from the canonical form.</li>
+<li><strong>Stable id.</strong> Derived from the blob's tail (12 chars, with <code>+/=</code> remapped to letters so it fits a URL-safe <code>^[a-z0-9]{12}$</code> pattern). Same key always gets the same id, idempotent across re-adds.</li>
+<li><strong>HTTP shape.</strong> <code>GET</code> lists; <code>POST</code> adds one; <code>PUT</code> replaces wholesale (dedup); <code>DELETE /&lt;id&gt;</code> removes one.</li>
+<li><strong>Why not uci.</strong> OpenWrt has no uci wrapper for SSH authorized keys. LuCI also writes the file directly via its rpcd <code>fs</code> plugin.</li>
+</ul>
+<h2 id="out-of-scope-state">Out-of-scope state</h2>
+<p>The following items are real configuration concerns that uapi deliberately does NOT cover. For each, the recommended out-of-band path is listed. An IaC orchestrator typically wires these once at image-bake time (cloud-init / <code>/etc/uci-defaults/</code>) rather than reaching for them on every reconcile.</p>
+<h3 id="unbound-listen-address-binding">Unbound listen-address binding</h3>
+<ul>
+<li><strong>Why excluded.</strong> OpenWrt's <code>unbound</code> uci has no clean option for binding the recursive server to a specific address (e.g. loopback-only). The upstream init script emits <code>interface-automatic: yes</code> unconditionally when <code>interface_auto=1</code>; there is no uci path that produces an <code>interface: 127.0.0.1</code> line. uapi's <code>unbound/server</code> resource curates every uci option the upstream init script actually consumes, but it deliberately does not invent an option that uci doesn't expose.</li>
+<li><strong>Recommended path.</strong> Drop your overrides into <code>/etc/unbound/unbound_srv.conf</code> (auto-included inside the <code>server:</code> clause), or set <code>manual_conf=1</code> via <code>PATCH /api/v1/unbound/server</code> and write the full <code>/etc/unbound/unbound.conf</code> yourself. The <code>unbound_srv.conf</code> file ships as a stub from the upstream package precisely for this use.</li>
+</ul>
+<h3 id="serial-console-inittab">Serial console / inittab</h3>
+<ul>
+<li><strong>Why excluded.</strong> <code>/etc/inittab</code> is not uci.</li>
+<li><strong>Recommended path.</strong> Bake the inittab edit into the image, or scp the desired <code>/etc/inittab</code> at first boot.</li>
+</ul>
+<h3 id="wake-on-lan-packets">Wake-on-LAN packets</h3>
+<ul>
+<li><strong>Why excluded.</strong> WoL is a runtime action (send a magic packet), not state.</li>
+<li><strong>Recommended path.</strong> Install <code>etherwake</code> via <code>packages/installed</code> and run it from a script over SSH or via a separate orchestration tool. The MAC + interface map is operator memory.</li>
+</ul>
+<h3 id="certificate-regeneration-via-px5g_x509">Certificate regeneration via <code>px5g_x509</code></h3>
+<ul>
+<li><strong>Why excluded.</strong> <code>uhttpd/certs</code> curates the px5g cert-generation PARAMETERS (days, bits, CN, etc.), but the actual one-shot regeneration is an action. uci doesn't model it.</li>
+<li><strong>Recommended path.</strong> Run <code>px5g_x509</code> (or <code>acme.sh</code> / <code>luci-app-acme</code> for real certs) out-of-band. For production, an ACME workflow keyed off a <code>cron</code> or systemd timer is the standard approach.</li>
+</ul>
+<h3 id="freebsd-sysctl-tunables-from-an-opnsense-style-migration">FreeBSD <code>sysctl</code> tunables from an OPNsense-style migration</h3>
+<ul>
+<li><strong>Why excluded.</strong> They don't map to OpenWrt's Linux kernel.</li>
+<li><strong>Recommended path.</strong> Identify the Linux equivalent (typically a <code>sysctl</code> parameter) and drop it into <code>/etc/sysctl.d/</code> at image-bake time.</li>
+</ul>
+<h3 id="rrd-netflow-history">RRD / NetFlow history</h3>
+<ul>
+<li><strong>Why excluded.</strong> Historical timeseries data is not uci-state. uapi exposes <code>vnstat/config</code> and <code>vnstat/interfaces</code> for configuring the collector; the database itself stays where vnstat puts it.</li>
+</ul>
+<h2 id="when-you-find-a-new-gap">When you find a new gap</h2>
+<p>If your real-world configuration needs something uapi can't currently express, the first question to ask is: does the underlying OpenWrt package expose this via uci? If yes, the curated resource is undercurated; file an issue. If no, the right fix is usually to upstream a uci option, not to add another non-uci resource to uapi.</p>
+<p>If, after weighing those, a new non-uci resource really IS the right answer, it needs to ship together with:</p>
+<ul>
+<li>A row in the CLAUDE.md "Non-uci resources" registry.</li>
+<li>A subsection in this doc describing source-of-truth, lock semantics, audit shape, validation, and the "why not uci" rationale.</li>
+<li>Integration test coverage of the read AND write paths.</li>
+<li>A scope-tree entry (<code>&lt;domain&gt;:&lt;resource&gt;:rw</code> / <code>:ro</code>).</li>
+<li>An explicit security review of the shell-out / file-write surface.</li>
+</ul>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/non-uci-state.md</code> at tag <code>v1.2.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v1.2.1/docs/non-uci-state.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

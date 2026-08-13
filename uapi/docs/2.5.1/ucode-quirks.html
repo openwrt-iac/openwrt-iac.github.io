@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ucode quirks that have bitten this project - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / ucode quirks that have bitten this project</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="ucode-quirks-that-have-bitten-this-project">ucode quirks that have bitten this project</h1>
+<p>A running list of <a href="https://ucode.mein.io/">ucode</a> and OpenWrt-runtime behaviors that look like JavaScript but aren't. Each one has cost at least one CI iteration to debug. Read this before touching ucode in this repo.</p>
+<p>ucode is OpenWrt's native scripting language. It powers <code>uhttpd-mod-ucode</code> (which serves uapi) and the build-time <code>gen_openapi.uc</code>. Most things work like JavaScript; the surprises are below.</p>
+<h2 id="language">Language</h2>
+<h3 id="no-function-hoisting-and-no-late-binding">No function hoisting AND no late binding</h3>
+<pre><code class="language-ucode">function g() { f(); }     // &lt;- ERROR when called: &quot;left-hand side is not a function&quot;
+function f() { ... }
+</code></pre>
+<p><code>g</code> captures the still-unset binding for <code>f</code> at its own declaration site. Define helpers BEFORE callers. For mutual recursion, forward-declare with <code>let A; let B;</code> and assign function expressions; <code>let</code> bindings are read at call time.</p>
+<h3 id="no-try-finally-only-try-catch">No <code>try / finally</code>, only <code>try / catch</code></h3>
+<p>Cleanup with the explicit pattern:</p>
+<pre><code class="language-ucode">let caught = null;
+try {
+    do_work();
+} catch (e) {
+    caught = e;
+}
+cleanup_must_run_either_way();
+if (caught != null) die(caught);
+</code></pre>
+<p><code>transaction.uc::transaction()</code> is the canonical example.</p>
+<h3 id="no-destructuring">No destructuring</h3>
+<p><code>let [a, b] = arr;</code> and <code>let {x, y} = obj;</code> do not parse. Write <code>let a = arr[0]; let b = arr[1];</code>.</p>
+<h3 id="dievalue-flattens-to-string-in-emessage"><code>die(value)</code> flattens to string in <code>e.message</code></h3>
+<p>When caught, <code>e.message</code> is a string. Rich exception objects do not survive. Use return-based error signaling (<code>{ ok: false, kind: "..." }</code>) instead of throwing custom-typed errors.</p>
+<h3 id="strings-are-not-indexable">Strings are not indexable</h3>
+<p><code>s[i]</code> does not return a character. Use <code>substr(s, i, 1)</code> or <code>ord(s, i)</code>.</p>
+<h3 id="object-literal-keys-must-be-strings">Object literal keys must be strings</h3>
+<p><code>{ "200": "OK" }</code> is fine; <code>{ 200: "OK" }</code> is not. Status codes and similar numeric keys are stringly-typed in this codebase.</p>
+<h3 id="numeric-looking-lookups-need-string-coercion">Numeric-looking lookups need string coercion</h3>
+<p><code>obj[200]</code> does NOT find the value stored at <code>"200"</code>. Coerce: <code>obj["" + status]</code>.</p>
+<h3 id="for-let-v-in-arr-iterates-values-not-indices"><code>for (let v in arr)</code> iterates values, not indices</h3>
+<pre><code class="language-ucode">for (let v in [10, 20, 30]) print(v);   // 10 20 30
+</code></pre>
+<p>This is the opposite of JS's <code>for...in</code>. If you need an index, use a C-style <code>for (let i = 0; ...)</code>.</p>
+<h3 id="loadfile-inherits-the-calling-vms-parse-mode"><code>loadfile()</code> inherits the calling VM's parse mode</h3>
+<p><code>uhttpd-mod-ucode</code> runs the handler in template mode (<code>{%</code>). Loading a raw-script <code>.uc</code> module from inside it needs explicit <code>loadfile(path, { raw_mode: true })</code>. The <code>load_resource</code> helper in <code>src/main.uc</code> does this for you.</p>
+<h3 id="typenull-returns-the-string-null"><code>type(null)</code> returns the string <code>"(null)"</code></h3>
+<p>Not <code>"null"</code>. Don't rely on the return value being JSON-shaped.</p>
+<h3 id="const-is-real"><code>const</code> is real</h3>
+<p><code>const X = ...</code> is parsed and enforced. Top-level data tables in this repo are mostly <code>const</code>.</p>
+<h2 id="openwrt-runtime-integration">OpenWrt runtime integration</h2>
+<h3 id="uhttpd-cgi-status-header-needs-a-reason-phrase">uhttpd CGI Status header needs a reason phrase</h3>
+<p><code>Status: 200 OK</code> works; <code>Status: 200</code> is silently dropped and the response defaults to 200. Always include the reason.</p>
+<h3 id="uhttpd-mod-ucode-loads-handlers-in-template-mode">uhttpd-mod-ucode loads handlers in template mode</h3>
+<p>The entry script must start with <code>{%</code> and define <code>global.handle_request(env)</code>. Module-level code runs once at uhttpd startup in the parent VM; each request is a forked child that inherits that VM via copy-on-write.</p>
+<h3 id="cursorgetpkg-sect-returns-the-section-type-not-the-dict"><code>cursor.get(pkg, sect)</code> returns the section TYPE, not the dict</h3>
+<p>To get the option dict, use <code>cursor.get_all(pkg, sect)</code>. This codebase wraps the call in <code>bus.uci_get</code> which does the right thing.</p>
+<h3 id="cursorexport-cursorimport-do-not-exist-in-ucode-mod-uci"><code>cursor.export</code> / <code>cursor.import</code> do not exist in ucode-mod-uci</h3>
+<p>The snapshot/restore mechanism in <code>transaction.uc</code> uses file IO on <code>/etc/config/&lt;pkg&gt;</code> plus <code>cursor.unload(pkg); cursor.load(pkg)</code>. If you need a snapshot somewhere new, use the existing helpers.</p>
+<h3 id="ucode-mod-digest-exports-digestsha256s-directly"><code>ucode-mod-digest</code> exports <code>digest.sha256(s)</code> directly</h3>
+<p>It returns the hex digest. There is no separate <code>sha256_hex</code>.</p>
+<h3 id="cursorsetpkg-name-type-three-args-creates-a-named-section"><code>cursor.set(pkg, name, type)</code> (three args) creates a named section</h3>
+<p>Prefer this over <code>cursor.add</code> + <code>cursor.rename</code> when you want a specific name from the start. uapi uses ULID-named sections for everything it creates.</p>
+<h3 id="file-handle-locking-uses-single-char-flags">File-handle locking uses single-char flags</h3>
+<pre><code class="language-ucode">fd.lock(&quot;x&quot;)    // LOCK_EX
+fd.lock(&quot;s&quot;)    // LOCK_SH
+fd.lock(&quot;n&quot;)    // LOCK_NB suffix, combine: &quot;xn&quot; for non-blocking exclusive
+fd.lock(&quot;u&quot;)    // LOCK_UN
+</code></pre>
+<p>Returns <code>true</code> on success, <code>null</code> on <code>EWOULDBLOCK</code> (with <code>fs.error()</code> set). See <code>transaction.uc::_lock_one()</code>.</p>
+<h3 id="networkinterfacex-renew-re-applies-the-config-the-handler-already-had"><code>network.interface.&lt;x&gt;</code> <code>renew</code> re-applies the config the handler already had</h3>
+<p>netifd gives a proto handler a copy of the interface config taken when the proto state was attached, and <code>renew</code> does not refresh it. A renew issued after a uci write therefore re-applies what was already running, and returns success. netifd also tears the interface down and back up for any proto-config change, so editing a wireguard peer destroys a working tunnel before the new peer list has been validated. uapi applies wireguard peers with <code>wg</code> directly for both reasons; see <code>src/lib/wg.uc</code>.</p>
+<h3 id="every-daemon-parses-uci-booleans-differently">Every daemon parses uci booleans differently</h3>
+<p>Read a boolean the way its owning daemon reads it, or a GET reports the
+operator's intent instead of the daemon's behaviour. The sets do not match, and
+netifd's is the strict one:</p>
+<table>
+<thead>
+<tr>
+<th>Reader</th>
+<th>true</th>
+<th>false</th>
+<th>anything else</th>
+<th>uapi helper</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>netifd C, via uci's blob converter</td>
+<td><code>1</code>, <code>true</code></td>
+<td><code>0</code>, <code>false</code></td>
+<td>option <strong>dropped</strong>, daemon default applies</td>
+<td><code>platform_bool</code></td>
+</tr>
+<tr>
+<td>netifd ucode, <code>parse_bool</code> in <code>/lib/netifd/utils.uc</code></td>
+<td><code>1</code>, <code>true</code></td>
+<td><code>0</code>, <code>false</code></td>
+<td>undefined, caller default</td>
+<td><code>platform_bool</code></td>
+</tr>
+<tr>
+<td>fw4, <code>parse_bool</code> in <code>/usr/share/ucode/fw4.uc</code></td>
+<td><code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code></td>
+<td><code>0</code>, <code>off</code>, <code>false</code>, <code>no</code></td>
+<td>daemon default</td>
+<td><code>normalize_bool</code></td>
+</tr>
+<tr>
+<td>shell init scripts, <code>get_bool</code> in <code>/lib/functions.sh</code></td>
+<td>those plus <code>enabled</code></td>
+<td>those plus <code>disabled</code></td>
+<td>caller default</td>
+<td><code>shell_bool</code></td>
+</tr>
+<tr>
+<td>raw compare, <code>[ "$x" != "1" ]</code></td>
+<td><code>1</code></td>
+<td>everything else</td>
+<td>there is no else</td>
+<td><code>strict_bool</code></td>
+</tr>
+<tr>
+<td>libvalidate <code>:bool:</code> via <code>uci_validate_section</code></td>
+<td>unverified</td>
+<td>unverified</td>
+<td>section <strong>dropped</strong>, see below</td>
+<td><code>normalize_bool</code></td>
+</tr>
+</tbody>
+</table>
+<p>So <code>option auto 'no'</code> on an interface does not disable autostart: netifd drops
+the value and uses its own <code>true</code>.</p>
+<p><strong>Pick the row, do not pick a default.</strong> This table previously said "<code>platform_bool</code>
+for netifd-owned fields and <code>normalize_bool</code> for the rest", and that "the rest"
+produced a bug in roughly forty places at once. The worst was <code>disabled</code> on a
+wireguard peer: <code>wireguard.sh</code> reads it with <code>config_get_bool</code>, so
+<code>option disabled 'yes'</code> means disabled, while <code>platform_bool</code> reported enabled and
+the next write pushed <code>disabled='0'</code> to uci and the peer into the kernel. Find the
+reader before choosing, and cite it in a comment when it is not obvious.</p>
+<p>The libvalidate row is honestly unknown: ubox is not in the SDK feeds, so the
+accepted set could not be read. It matters more than the others, because a value
+<code>validate_data</code> rejects makes the init script drop the <strong>whole section</strong> rather
+than fall back to a default (<code>dropbear.init</code> and <code>sysntpd</code> both do this). Until
+someone reads ubox, <code>normalize_bool</code> is the conservative guess for those fields:
+<code>system.log_remote</code>, <code>system/timeservers</code>, and dropbear's auth flags.</p>
+<p>Writes still emit <code>"1"</code> / <code>"0"</code>, which every reader above accepts.</p>
+<p>A related trap the table cannot catch: an option that is not a boolean at all.
+<code>system.urandom_seed</code> is the filesystem path the entropy seed is written to, and
+<code>lldpd</code>'s <code>lldp_description</code> is free text. Both were typed boolean, so a write
+replaced the operator's value with <code>"1"</code>.</p>
+<h3 id="real-ubus-and-uci-modules-are-so-packages">Real <code>ubus</code> and <code>uci</code> modules are <code>.so</code> packages</h3>
+<p>They live in the default <code>REQUIRE_SEARCH_PATH</code> ahead of any project paths. Naming a local lib <code>ubus.uc</code> shadows nothing because the <code>.so</code> wins. uapi calls its abstraction <code>bus.uc</code> to avoid the collision.</p>
+<h2 id="when-you-find-a-new-one">When you find a new one</h2>
+<p>Add it here. The bar is "this would have saved me a CI round-trip if I had seen it first." The list grows; that's how it pays off.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/ucode-quirks.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

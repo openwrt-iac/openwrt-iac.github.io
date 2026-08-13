@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curated resources - uapi 1.2.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 1.2.1 / Curated resources</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="curated-resources">Curated resources</h1>
+<p>This is a sketch of what each curated endpoint does. For the full schema (every field, its type, enum values where applicable), read <code>build/openapi.json</code> (also served at <code>/api/v1/openapi.json</code> on a live router) or open it in Swagger UI.</p>
+<p>The curl example for each is in <code>examples/curl/</code>.</p>
+<h2 id="apiv1firewallrules"><code>/api/v1/firewall/rules</code></h2>
+<p>Wraps <code>config rule</code> in <code>/etc/config/firewall</code>. Full CRUD.</p>
+<p>Curated shape uses a nested <code>match: {src_zone, dest_zone, src_ip, dest_ip, src_port, dest_port, proto, family}</code> block to keep the top level focused on what the rule <em>does</em> (<code>target</code>, <code>enabled</code>, <code>name</code>). Cross-reference validation rejects rules referencing zones that don't exist.</p>
+<p>Reload: <code>firewall</code> (fw4).</p>
+<h2 id="apiv1firewallzones"><code>/api/v1/firewall/zones</code></h2>
+<p>Wraps <code>config zone</code>. <code>input</code>/<code>output</code>/<code>forward</code> policies, <code>network</code> list (interfaces this zone covers), <code>masq</code>/<code>mtu_fix</code> toggles.</p>
+<p>Reload: <code>firewall</code>.</p>
+<h2 id="apiv1firewallredirects"><code>/api/v1/firewall/redirects</code></h2>
+<p>Wraps <code>config redirect</code> (port forwards). Like rules but with <code>src_dport</code>/<code>dest_ip</code>/<code>dest_port</code> for DNAT and <code>target</code> defaulting to <code>DNAT</code>.</p>
+<p>Reload: <code>firewall</code>.</p>
+<h2 id="apiv1networkinterfaces"><code>/api/v1/network/interfaces</code></h2>
+<p>Wraps <code>config interface</code> in <code>/etc/config/network</code>. <code>proto</code> (static/dhcp/dhcpv6/pppoe/none/ppp/wwan), <code>ipaddr</code>/<code>netmask</code>/<code>gateway</code>/<code>dns</code> for static, plus <code>device</code>, <code>mtu</code>, <code>auto</code>, <code>ip6assign</code>.</p>
+<p><strong>Be careful editing the interface that backs your management connection.</strong> <code>/etc/init.d/network reload</code> returns exit 0 even when an interface fails to come up at runtime; you can lose the box. uapi only sees the init script's exit code, not the daemon's runtime convergence. Use <code>/raw/network/&lt;id&gt;</code> if you need finer control over the timing, or front the API with a session that survives the reload.</p>
+<p>Reload: <code>network</code> (netifd).</p>
+<h2 id="apiv1networkdevices"><code>/api/v1/network/devices</code></h2>
+<p>Wraps <code>config device</code> (bridges, VLANs, etc.). <code>type</code> enum (<code>bridge</code>, <code>8021q</code>, <code>8021ad</code>, <code>macvlan</code>, <code>veth</code>, <code>tun</code>, <code>tap</code>). For bridges, <code>ports</code> is the member-interface list. For 8021q, <code>vid</code> is the VLAN id.</p>
+<p>Reload: <code>network</code>.</p>
+<h2 id="apiv1wirelessdevices"><code>/api/v1/wireless/devices</code></h2>
+<p>Wraps <code>config wifi-device</code> (radios). <code>type</code> (<code>mac80211</code>/<code>broadcom</code>), <code>band</code> (<code>2g</code>/<code>5g</code>/<code>6g</code>/<code>60g</code>), <code>channel</code>, <code>htmode</code>, <code>country</code>, <code>txpower</code>, <code>disabled</code>.</p>
+<p>Reload: <code>network</code>.</p>
+<h2 id="apiv1wirelessinterfaces"><code>/api/v1/wireless/interfaces</code></h2>
+<p>Wraps <code>config wifi-iface</code> (SSIDs). <code>device</code> references a wifi-device id, <code>network</code> references a network interface, <code>mode</code> (<code>ap</code>/<code>sta</code>/etc.), <code>ssid</code>, <code>encryption</code>, <code>key</code>, plus flags.</p>
+<p><strong>The <code>key</code> field is write-only.</strong> <code>fromUci</code> does not return it. Responses include <code>has_key: true</code> when one is set, so clients can tell whether a key exists without seeing it. To rotate, send <code>{"key": "newvalue"}</code> via PATCH.</p>
+<p>Reload: <code>network</code>.</p>
+<h2 id="apiv1dhcphosts"><code>/api/v1/dhcp/hosts</code></h2>
+<p>Wraps <code>config host</code> (static leases) in <code>/etc/config/dhcp</code>. <code>mac</code> and <code>ip</code> required, plus optional <code>name</code>, <code>leasetime</code>, <code>tag</code>, <code>dns</code> (whether to add a DNS entry).</p>
+<p>Reload: <code>dnsmasq</code>.</p>
+<h2 id="apiv1dhcpleases-read-only"><code>/api/v1/dhcp/leases</code> (read-only)</h2>
+<p>Source: <code>/tmp/dhcp.leases</code> (IPv4 only in v1). One entry per active lease: <code>expires_at</code> (unix ts), <code>mac</code>, <code>ip</code>, <code>hostname</code>, <code>duid</code>.</p>
+<p><code>GET /api/v1/dhcp/leases</code> returns the full list. <code>GET /api/v1/dhcp/leases/&lt;mac&gt;</code> returns one. All write methods return <code>405 method_not_allowed</code>.</p>
+<p>IPv6 leases (via odhcpd) are not exposed in v1.</p>
+<h2 id="apiv1system-singleton"><code>/api/v1/system</code> (singleton)</h2>
+<p>Wraps the lone <code>config system</code> section in <code>/etc/config/system</code>. <code>hostname</code>, <code>description</code>, <code>notes</code>, <code>timezone</code>, <code>zonename</code>, <code>log_size</code>, <code>log_ip</code>, <code>log_proto</code>, <code>log_remote</code>, <code>urandom_seed</code>.</p>
+<p>GET and PATCH only. No POST or DELETE (you can't create or remove the singleton). The URL has no <code>/&lt;id&gt;</code> segment.</p>
+<p>Reload: none (system config is read on demand).</p>
+<h2 id="apiv1rawpackageid-generic"><code>/api/v1/raw/&lt;package&gt;/&lt;id&gt;</code> (generic)</h2>
+<p>The escape hatch for any uci config type uapi doesn't curate. See <code>docs/raw.md</code> for full semantics, scope composition rules, and the stability caveat.</p>
+<h2 id="apiv1healthz-and-apiv1openapijson"><code>/api/v1/healthz</code> and <code>/api/v1/openapi.json</code></h2>
+<p><code>/healthz</code> is a no-auth liveness probe (TLS-for-non-localhost still applies). Returns <code>{status: "ok", version}</code> or 503 if ubus is unreachable.</p>
+<p><code>/openapi.json</code> is the OpenAPI 3.1 spec, no auth, public for tooling.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/resources.md</code> at tag <code>v1.2.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v1.2.1/docs/resources.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding a curated resource - uapi 1.2.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 1.2.1 / Adding a curated resource</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="adding-a-curated-resource">Adding a curated resource</h1>
+<p>This is the workflow we used for every resource in <code>src/resources/</code>. Following it should take an hour for a typical config type.</p>
+<p>The reference implementations live in <code>src/resources/</code>; <code>firewall.rules.uc</code> is the most-featured (cross-reference validation, nested <code>match</code> block) and <code>system.uc</code> is the simplest (singleton, flat fields).</p>
+<h2 id="1-pick-the-uci-package-and-section-type">1. Pick the uci package and section type</h2>
+<p>Look at <code>/etc/config/&lt;package&gt;</code> on a real router. Find the section type you want to expose. Note the option names, which are lists vs. scalars, which are uci-bools (<code>"1"</code>/<code>"0"</code>/<code>"on"</code>/<code>"off"</code>), and which reference other sections.</p>
+<h2 id="2-create-the-resource-module">2. Create the resource module</h2>
+<p><code>src/resources/&lt;package&gt;.&lt;plural-type&gt;.uc</code>. Export the uniform contract:</p>
+<pre><code class="language-ucode">return {
+    package: &quot;&lt;package&gt;&quot;,         // uci package
+    type: &quot;&lt;section-type&gt;&quot;,        // uci section type
+    reload: [&quot;&lt;service&gt;&quot;],         // ubus services to reload on write
+    fromUci: (section) =&gt; {...},   // uci section dict -&gt; response JSON
+    toUci: (json) =&gt; {...},        // request JSON -&gt; uci option dict
+    validate: (json, conn) =&gt; [],  // returns array of {field, code, message}
+    schema_properties: { ... },    // optional; OpenAPI enrichment (enums/formats)
+};
+</code></pre>
+<p><code>fromUci</code> and <code>toUci</code> form a (lossy) bijection: round-tripping a section through both should produce the same uci options.</p>
+<p><code>validate</code> runs on every write. It must return an array of errors (each <code>{field, code, message}</code>), one per problem; the caller decides whether to translate to a <code>422</code> response. The codes come from a fixed set: <code>required</code>, <code>invalid_type</code>, <code>invalid_format</code>, <code>out_of_range</code>, <code>not_in_enum</code>, <code>conflict</code>, <code>read_only</code>.</p>
+<p>For cross-reference validation (e.g. "this firewall rule's <code>src_zone</code> must be a real zone"), use the <code>conn</code> argument. See <code>firewall.rules.uc</code>'s <code>load_zones(conn)</code> for the pattern.</p>
+<h2 id="3-json-conventions">3. JSON conventions</h2>
+<p>Per CLAUDE.md:</p>
+<ul>
+<li><code>snake_case</code> field names.</li>
+<li>Stable <code>id</code> at top level (set by the dispatcher; your <code>fromUci</code> provides it from <code>section['.name']</code>).</li>
+<li><code>managed: bool</code> at top level. Derive from <code>!section['.anonymous']</code>.</li>
+<li>Normalize uci booleans to JSON booleans on the way out; emit <code>"1"</code>/<code>"0"</code> on the way in.</li>
+<li>Lift single-value uci list options to JSON arrays (a uci list with one element comes through as a string from <code>cursor.get</code>; coerce to an array).</li>
+<li>Nest related fields where it improves readability. <code>firewall.rules</code> uses <code>match: {src_zone, dest_zone, src_ip, ...}</code> rather than a flat top-level. This pays off in the Terraform mapping.</li>
+<li>Runtime/computed fields go under <code>runtime: {...}</code>. Currently empty for most resources; populate when ubus exposes useful data.</li>
+</ul>
+<h2 id="4-add-unit-tests">4. Add unit tests</h2>
+<p><code>tests/unit/&lt;package&gt;_&lt;type&gt;_test.uc</code>. Test <code>fromUci</code>, <code>toUci</code> (including round-trip), and <code>validate</code> for required-missing, enum-violation, and format cases.</p>
+<p>For cross-reference validation, use the <code>bus</code> stub:</p>
+<pre><code class="language-ucode">let bus = require('bus');
+let c = bus.stub({
+    uci: { firewall: { z_lan: { '.type': 'zone', name: 'lan' } } }
+});
+let errs = mod.validate({ ... }, c);
+</code></pre>
+<h2 id="5-register-the-resource">5. Register the resource</h2>
+<p><code>src/main.uc</code> has a <code>RESOURCES</code> registry (CRUD) and a <code>SINGLETONS</code> registry (single-section types like <code>system</code>). Add a line:</p>
+<pre><code class="language-ucode">&quot;&lt;domain&gt;:&lt;plural-type&gt;&quot;: handler.make(load_resource(&quot;&lt;package&gt;.&lt;plural-type&gt;.uc&quot;)),
+</code></pre>
+<p>Use <code>handler.make_singleton</code> for singletons, <code>handler.make_collection</code> for read-only runtime lists.</p>
+<h2 id="6-add-an-integration-test">6. Add an integration test</h2>
+<p><code>tests/integration/&lt;NN&gt;_&lt;resource&gt;_test.sh</code>. Use the install helper:</p>
+<pre><code class="language-sh">. tests/integration/lib/install_uapi.sh
+install_uapi
+# ADMIN_TOKEN, RO_TOKEN, FW_RO_TOKEN are exported.
+# Drive via curl; check status code and key fields in the response body.
+</code></pre>
+<p>Cover at least: POST creates, GET reads, validation failure returns 422, DELETE returns 204.</p>
+<h2 id="7-regenerate-openapi">7. Regenerate OpenAPI</h2>
+<pre><code class="language-sh">make openapi
+</code></pre>
+<p>This walks the resource modules and emits <code>build/openapi.json</code>. Add an entry for the new resource in <code>build/gen_openapi.uc</code>'s <code>ENDPOINTS</code> list. The lint job in CI gates against drift, so commit the regenerated <code>openapi.json</code> alongside the resource.</p>
+<h2 id="8-add-a-curl-example">8. Add a curl example</h2>
+<p><code>examples/curl/&lt;resource&gt;.sh</code>. One POST + GET + PATCH cycle, ending with a "to delete: ..." reminder.</p>
+<h2 id="9-update-docstokensmd">9. Update docs/tokens.md</h2>
+<p>If the new resource introduces a new scope path (e.g. a new package), add it to the scope tree table.</p>
+<h2 id="things-to-watch-for">Things to watch for</h2>
+<ul>
+<li>ucode does not hoist function declarations. Define helpers before callers.</li>
+<li><code>cursor.get(pkg, sect)</code> returns the section <em>type</em> as a string. The dict requires <code>cursor.get_all(pkg, sect)</code>. Our <code>bus.uci_get</code> already does the right thing.</li>
+<li>ucode-mod-uci has no <code>cursor.export</code>/<code>cursor.import</code>. Snapshot/restore is file IO via <code>bus.uci_export</code>/<code>uci_import</code>.</li>
+<li>Resources are loaded with <code>{raw_mode: true}</code> from the template-mode main.uc handler. They should be raw-script (<code>.uc</code> files starting with code, not <code>{%</code>).</li>
+</ul>
+<p>See <code>memory/project_ucode_quirks.md</code> (auto-loaded into Claude Code sessions on this project) for the full running list of gotchas.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/adding-a-resource.md</code> at tag <code>v1.2.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v1.2.1/docs/adding-a-resource.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operations - uapi 2.5.1 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 2.5.1 / Operations</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="operations">Operations</h1>
+<h2 id="success-means-exit-0-not-runtime-convergence">"Success" means exit 0, not runtime convergence</h2>
+<p>A 2xx response to a write means: snapshot OK, validate OK, uci commit
+OK, and the init script's reload action exited 0. It does NOT mean the
+daemon has finished re-converging.</p>
+<p>The most dangerous case is <code>network/interfaces</code>: a write that produces a
+config netifd later rejects (bad proto, missing dep, conflicting
+addresses) can drop the management connection. uapi only sees the init
+script's exit code; netifd's runtime convergence happens after, in the
+background.</p>
+<p>Two signals worth wiring into your automation:</p>
+<ul>
+<li><strong><code>X-Reload-Status</code></strong> response header on curated-resource writes: <code>ok</code> means the init
+  script ran and exited 0; <code>no_reload</code> means the resource has no reload
+  services. The header is intentionally not a "converged" promise.
+  In practice you will only ever see <code>ok</code>: all 43 writable resources declare
+  at least one reload service, so <code>no_reload</code> describes a resource shape that
+  does not currently exist. <code>system</code> used to be cited here as the example and
+  is not one, since it reloads <code>system</code> and <code>log</code>.</li>
+<li><strong><code>X-Reload-Services</code></strong>: comma-separated list of init scripts that
+  ran. Useful for audit/log correlation.</li>
+</ul>
+<p>For high-stakes writes (the management interface, firewall defaults,
+uhttpd itself) verify convergence out-of-band: poll the <code>runtime</code> block
+on the resource you just modified, check ubus state, or simply ping the
+box and confirm reachability. uapi cannot do this for you; the init
+script doesn't know either.</p>
+<p>A future <code>commit-confirmed</code> mode (apply, wait N seconds, auto-revert
+unless client acks) would close the gap but conflicts with the
+fork-per-request model. Tracked in <code>docs/roadmap.md</code> under "Needs more
+reflection".</p>
+<h2 id="ntp">NTP</h2>
+<p>Audit logs and request IDs both encode timestamps. If the router's clock is wrong, those timestamps are wrong, and correlating events across machines breaks.</p>
+<p>OpenWrt ships an SNTP client (<code>sysntpd</code>) enabled by default. Confirm it is running and has synced:</p>
+<pre><code class="language-sh">/etc/init.d/sysntpd status
+date
+</code></pre>
+<p>If the router has no internet during boot (or you ship a different time source), point sysntpd at it via <code>uci set system.ntp.server=...</code>.</p>
+<h2 id="persistent-syslog">Persistent syslog</h2>
+<p>By default <code>logd</code> keeps the log ring in memory (default size 16 KiB) and loses it on reboot. For any router serving uapi in production, configure persistent logging:</p>
+<pre><code class="language-sh">uci set system.@system[0].log_file='/var/log/messages'
+uci set system.@system[0].log_size='2048'      # KiB; tune to flash health
+uci commit system
+/etc/init.d/log restart
+</code></pre>
+<p>This writes the in-memory ring through to flash, surviving reboots. Mind flash wear: 2-4 MiB is typical; full-time access logging is not appropriate for flash without external storage.</p>
+<p>For longer retention, mount a USB stick or remote filesystem and point <code>log_file</code> there.</p>
+<h2 id="forwarding-audit-logs-off-box">Forwarding audit logs off-box</h2>
+<p>uapi emits one syslog line per successful write under the <code>daemon.notice</code> priority. Forward to a central collector for tamper-resistant audit trails:</p>
+<pre><code class="language-sh">uci set system.@system[0].log_ip='10.0.0.5'        # syslog collector IP
+uci set system.@system[0].log_port='514'
+uci set system.@system[0].log_proto='udp'          # or 'tcp' for reliability
+uci commit system
+/etc/init.d/log restart
+</code></pre>
+<p>The receiving collector (rsyslog, syslog-ng, Loki, Splunk, etc.) can filter on the <code>uapi:</code> prefix to isolate API audit events.</p>
+<h2 id="log-categories">Log categories</h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>syslog severity</th>
+<th>Default</th>
+<th>Triggers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AUDIT</td>
+<td>NOTICE</td>
+<td>on</td>
+<td>Successful writes (POST/PUT/DELETE 2xx)</td>
+</tr>
+<tr>
+<td>ERROR</td>
+<td>WARN / ERR</td>
+<td>on</td>
+<td>Auth failures (401/403), all 5xx</td>
+</tr>
+<tr>
+<td>ACCESS</td>
+<td>INFO</td>
+<td>off</td>
+<td>Every request (non-<code>/healthz</code>)</td>
+</tr>
+<tr>
+<td>DEBUG</td>
+<td>DEBUG</td>
+<td>off</td>
+<td>Per-ubus-call tracing</td>
+</tr>
+</tbody>
+</table>
+<p><code>/healthz</code> is excluded from all categories so monitoring traffic does not drown out the audit trail. Non-auth 4xx responses (404, 405, 409, 422, 423) are not logged: the client receives the error directly and there is no operator-actionable signal in volume.</p>
+<p>ACCESS and DEBUG are opt-in via <code>/etc/config/uapi</code>:</p>
+<pre><code>config logging
+    option access '0'
+    option debug '0'
+</code></pre>
+<h2 id="log-line-format">Log line format</h2>
+<p>Plain text, fixed field order, syslog-native (chosen over JSON-per-line because <code>logread</code> is the primary consumer):</p>
+<pre><code>uapi: &lt;request_id&gt; &lt;token_name|-&gt; &lt;severity&gt; &lt;code&gt; &lt;method&gt; &lt;path&gt; &lt;status&gt; [&lt;duration_ms&gt;ms]
+</code></pre>
+<ul>
+<li><code>request_id</code>: ULID; also returned in the <code>X-Request-Id</code> response header. The link between server-side log and client-visible response.</li>
+<li><code>token_name</code>: never the token value. <code>-</code> for unauthenticated failures (e.g. missing <code>Authorization</code>).</li>
+<li><code>severity</code>: <code>AUDIT</code> (writes), <code>ACCESS</code> (every request, if enabled), <code>WARN</code> (401/403 auth failures), <code>ERROR</code> (5xx).</li>
+<li><code>code</code>: error code on failures, <code>-</code> on successful writes.</li>
+</ul>
+<p><code>/healthz</code> is excluded from all categories so monitoring traffic does not drown out the audit trail. Non-auth 4xx responses (404, 405, 409, 422, 423) are not logged: the client receives the error directly and there is no operator-actionable signal in volume.</p>
+<h2 id="sample-syslog-output">Sample syslog output</h2>
+<pre><code># AUDIT: a successful POST that created a firewall rule
+uapi[1234]: 01HX1234567890ABCDEFGHJKMN tf-prod AUDIT - POST /api/v2/firewall/rules 200 [42ms]
+
+# ERROR (5xx)
+uapi[1234]: 01HX234567890ABCDEFGHJKMNN tf-prod ERROR reload_failed_restored PUT /api/v2/network/interfaces/wan 500 [3120ms]
+
+# WARN (auth failure)
+uapi[1234]: 01HX34567890ABCDEFGHJKMNNN - WARN unauthorized GET /api/v2/system 401 [1ms]
+
+# ACCESS (only when option access '1' is set)
+uapi[1234]: 01HX4567890ABCDEFGHJKMNNNN tf-readonly ACCESS - GET /api/v2/firewall/rules 200 [8ms]
+
+# DEBUG (only when option debug '1' is set; per ubus.call)
+uapi[1234]: uapi-bus call system.info args={}
+
+# Internal error from the top-level exception handler
+uapi[1234]: uapi-internal 01HX567890ABCDEFGHJKMNNNNN: Type error: ...
+
+# Insecure-bypass marker triggered
+uapi[1234]: uapi-insecure-bypass 01HX67890ABCDEFGHJKMNNNNNN GET /api/v2/system status=200 remote=10.0.2.2
+</code></pre>
+<p>By default only AUDIT (successful writes) and ERROR/WARN (failures) are logged. Optional knobs in <code>/etc/config/uapi</code>:</p>
+<pre><code>config logging
+    option access '1'   # log every request (INFO)
+    option debug '1'    # per-ubus-call tracing (DEBUG)
+</code></pre>
+<p>Leave these off unless you're debugging. They are noisy and will fill the in-memory ring quickly.</p>
+<h2 id="metrics">Metrics</h2>
+<p><code>GET /api/v2/metrics</code> returns Prometheus 0.0.4 text. Scope: <code>uapi:metrics:ro</code>
+(covered by <code>*:ro</code>). Counters and histograms are file-backed under
+<code>/tmp/uapi-metrics/</code> (tmpfs - resets on reboot, which is fine for
+operational counters; aggregate longer-term retention server-side).</p>
+<p>Series:</p>
+<table>
+<thead>
+<tr>
+<th>Series</th>
+<th>Type</th>
+<th>Labels</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>uapi_requests_total</code></td>
+<td>counter</td>
+<td><code>method</code>, <code>path</code> (template, e.g. <code>/firewall/rules/:id</code>), <code>status</code>, <code>token_id</code> (<code>-</code> if pre-auth)</td>
+</tr>
+<tr>
+<td><code>uapi_request_duration_seconds_bucket</code></td>
+<td>histogram</td>
+<td><code>method</code>, <code>path</code>, <code>le</code></td>
+</tr>
+<tr>
+<td><code>uapi_request_duration_seconds_count</code></td>
+<td>counter</td>
+<td><code>method</code>, <code>path</code></td>
+</tr>
+<tr>
+<td><code>uapi_rate_limit_drops_total</code></td>
+<td>counter</td>
+<td><code>token_id</code></td>
+</tr>
+<tr>
+<td><code>uapi_lock_contention_total</code></td>
+<td>counter</td>
+<td><code>lock_type</code></td>
+</tr>
+<tr>
+<td><code>uapi_validate_errors_total</code></td>
+<td>counter</td>
+<td><code>resource</code>, <code>code</code></td>
+</tr>
+</tbody>
+</table>
+<p>Path templates are normalized (<code>/firewall/rules/:id</code> not the concrete
+ULID) to keep label cardinality bounded as clients create/destroy
+resources. The <code>token_id</code> label is bounded by the operator-configured
+token count (typically a small set); pre-auth failures (401 before
+authorize completes) carry <code>token_id="-"</code> so the series row still
+aggregates.</p>
+<p>Sample Prometheus scrape config:</p>
+<pre><code class="language-yaml">scrape_configs:
+  - job_name: uapi
+    scrape_interval: 30s
+    metrics_path: /api/v2/metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: &lt;metrics-token&gt;
+    static_configs:
+      - targets: ['router.example.com']
+</code></pre>
+<p>For broader router-level metrics (load, memory, network counters), the
+curated <code>prometheus_node_exporter_lua/config</code> resource manages
+node_exporter's config separately.</p>
+<h2 id="rate-limiting">Rate limiting</h2>
+<p>Per-token token-bucket, file-backed at <code>/tmp/uapi-ratelimit/&lt;token&gt;.txt</code>.
+Defaults: <strong>100 req/s, burst 200</strong> per token. Tune globally via
+<code>/etc/config/uapi</code>:</p>
+<pre><code>config ratelimit
+    option rate '500'
+    option burst '1000'
+</code></pre>
+<p>No reload needed; the config is read on each authed request.</p>
+<p>Per-token overrides win over global: <code>uci set uapi.&lt;token&gt;.rate='10'</code>,
+<code>uci set uapi.&lt;token&gt;.burst='20'</code>. Useful for noisy CI tokens that
+shouldn't share the global budget.</p>
+<p>Exceeded rate returns <code>429 too_many_requests</code> with <code>Retry-After: &lt;seconds&gt;</code>.
+The drop is counted in <code>uapi_rate_limit_drops_total{token_id}</code> for
+operator visibility. Rate limit is a defense-in-depth abuse guard, not a
+security control on its own; use <code>allowed_cidrs</code> on the token for actual
+source-IP enforcement.</p>
+<h2 id="diagnostics">Diagnostics</h2>
+<p><code>GET /api/v2/diagnostics</code> returns version, uptime, loaded resources,
+current lock holders, and the last 20 error envelopes emitted by the
+parent uhttpd VM. Scope: <code>uapi:diagnostics:ro</code>.</p>
+<pre><code class="language-json">{
+  &quot;version&quot;: &quot;2.0.0&quot;,
+  &quot;uptime_seconds&quot;: 123456,
+  &quot;resources_loaded&quot;: [&quot;firewall:rules&quot;, &quot;firewall:zones&quot;, &quot;...&quot;],
+  &quot;lock_state&quot;: {
+    &quot;global_held&quot;: false,
+    &quot;per_package&quot;: {}
+  },
+  &quot;recent_errors&quot;: [
+    { &quot;ts&quot;: 1780510463, &quot;request_id&quot;: &quot;01HX...&quot;, &quot;code&quot;: &quot;validation_failed&quot;,
+      &quot;status&quot;: 422, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/api/v2/firewall/rules&quot;,
+      &quot;message&quot;: &quot;Request body failed validation&quot; }
+  ],
+  &quot;request_id&quot;: &quot;01HX...&quot;
+}
+</code></pre>
+<h3 id="finding-sections-a-write-would-reject-validate1">Finding sections a write would reject (<code>?validate=1</code>)</h3>
+<p><code>GET /api/v2/diagnostics?validate=1</code> adds a validation sweep: every section of
+every resource the token may read is run through the same path a write takes, and
+the ones that would be rejected are reported with the reason.</p>
+<pre><code class="language-json">{
+  &quot;invalid_sections&quot;: [
+    { &quot;resource&quot;: &quot;firewall/rules&quot;, &quot;id&quot;: &quot;sweepbad&quot;, &quot;managed&quot;: true,
+      &quot;errors&quot;: [ { &quot;field&quot;: &quot;match.proto&quot;, &quot;code&quot;: &quot;conflict&quot;,
+                    &quot;message&quot;: &quot;firewall4 keeps a port match only on tcp or udp, so this rule would match the whole protocol instead&quot; } ] }
+  ],
+  &quot;swept_resources&quot;: [&quot;firewall:defaults&quot;, &quot;firewall:rules&quot;, &quot;...&quot;],
+  &quot;skipped_for_scope&quot;: []
+}
+</code></pre>
+<p>It answers "which sections on this router will stop being accepted" before an
+upgrade, rather than one <code>422</code> at a time during a write. Every section it reports
+is already broken on the router: the rule above is already matching a whole
+protocol rather than a port. The sweep is the first time anyone is told.</p>
+<p>Three things worth knowing:</p>
+<ul>
+<li><strong>Opt-in on purpose.</strong> Each resource walks its own uci package, so a package is
+  traversed once per resource that lives in it, six times for <code>firewall</code> and
+  <code>network</code>. The cost therefore scales with the number of sections in the
+  configuration, not with a fixed overhead: 45 resources over a stock-sized
+  configuration measured about 90 ms, and a router with a large firewall will be
+  slower. <code>/diagnostics</code> is what a monitoring system polls on an interval, so
+  without <code>?validate=1</code> the response is unchanged and costs nothing extra.</li>
+<li><strong>Scoped per resource.</strong> The endpoint needs <code>uapi:diagnostics:ro</code>, and each
+  resource is included only if the token also permits <code>:ro</code> on it, because the
+  findings name sections and quote configured values. A token with only
+  <code>uapi:diagnostics:ro</code> therefore sweeps nothing, which is why
+  <code>skipped_for_scope</code> exists: an empty <code>invalid_sections</code> with a long
+  <code>skipped_for_scope</code> means "not allowed to look", not "nothing wrong".</li>
+<li><strong>Read-only and side-effect free</strong>, so it is safe to run against production,
+  which is exactly when it is most wanted.</li>
+</ul>
+<p>One finding shape differs. If a resource's sweep itself fails, the entry reports
+<code>code: "sweep_failed"</code> with <code>id</code> and <code>managed</code> both <code>null</code>, because there is no
+section to name:</p>
+<pre><code class="language-json">{ &quot;resource&quot;: &quot;firewall/rules&quot;, &quot;id&quot;: null, &quot;managed&quot;: null,
+  &quot;errors&quot;: [ { &quot;field&quot;: &quot;&quot;, &quot;code&quot;: &quot;sweep_failed&quot;, &quot;message&quot;: &quot;...&quot; } ] }
+</code></pre>
+<p>That is deliberately a finding rather than a failed request: a resource that could
+not be checked must not be reported as clean.</p>
+<p><code>dhcp/leases</code> and <code>dhcp/leases6</code> are not swept. They are read-only views of
+daemon state with no validation to run.</p>
+<p>The <code>recent_errors</code> ring is best-effort: writes to <code>/tmp/uapi-error-ring/</code>
+must never disrupt the actual response, so a disk-full or permission
+failure simply produces an empty ring rather than a 5xx on the original
+request. The ring caps at 20 entries (oldest dropped first).</p>
+<p>Useful for "is anything stuck holding the global lock?" - a non-empty
+<code>per_package</code> map under steady state would point at a wedged write
+transaction.</p>
+<h2 id="management-path-warning">Management-path warning</h2>
+<p>The lockout this guards against is the one atomic writes cannot help with: a change that
+reloads cleanly and then severs the only path to the box. uapi warns rather than refuses,
+because renumbering the management VLAN or moving to an out-of-band path are legitimate
+things to do, and because LuCI warns rather than blocking on the same condition.</p>
+<p>Two places report it, and they answer different questions.</p>
+<p><code>GET /diagnostics</code> carries <code>management_path</code>, which names the interface this request
+arrived through:</p>
+<pre><code class="language-json">{ &quot;management_path&quot;: { &quot;address&quot;: &quot;192.168.0.236&quot;, &quot;device&quot;: &quot;eth1&quot;, &quot;interface&quot;: &quot;wan&quot; } }
+</code></pre>
+<p>That is the pre-flight answer. Ask it before a risky write, or have a wrapper ask it, and
+you know which interface not to touch. <code>interface</code> is <code>null</code> when the request arrives on a
+device no uci interface claims, which is honest rather than a guess.</p>
+<p>A write to <code>network/interfaces</code> gets <code>X-Mgmt-Path-Warning</code> when it moves that interface's
+<code>disabled</code>, <code>proto</code>, <code>ipaddr</code>, <code>ipaddrs</code> or <code>netmask</code>, or deletes it. That is the after-the-fact
+answer, and it is worth having because most such writes do not actually break the path:
+the header tells an operator they are in a risky state while the connection still works.</p>
+<p>Its limit, stated plainly: if the write really does strand you, the response never
+arrives. This is not a safety net, it is a warning light. The scope is deliberately
+LuCI's: those four field names on the inbound interface, and no firewall analysis at all,
+because predicting a firewall lockout means modelling fw4 zone and rule ordering, and a
+guess dressed as a warning is worse than silence.</p>
+<p>The interface is derived from the kernel's own route lookup rather than by comparing the
+caller's address against each interface's configured prefixes. An operator reaching the
+box from another network sits inside no local prefix, and that is exactly the operator a
+write can strand, so containment arithmetic would report "unknown" for the case that
+matters most. The route lookup also answers for IPv6, where uapi's own prefix helpers are
+IPv4-only.</p>
+<h2 id="healthz">Healthz</h2>
+<pre><code class="language-sh">curl -k https://&lt;router&gt;/api/v2/healthz
+# 200 with body:
+# { &quot;status&quot;: &quot;ok&quot;, &quot;version&quot;: &quot;2.0.0&quot;,
+#   &quot;checks&quot;: { &quot;ubus&quot;: &quot;ok&quot;, &quot;uci&quot;: &quot;ok&quot;,
+#               &quot;lock_dir&quot;: &quot;ok&quot;, &quot;time_sync&quot;: &quot;ok&quot; } }
+# 503 with body:
+# { &quot;status&quot;: &quot;degraded&quot;, &quot;version&quot;: &quot;...&quot;, &quot;checks&quot;: {...},
+#   &quot;errors&quot;: [&quot;ubus: ...&quot;, &quot;time_sync: clock not synced (epoch below sanity floor)&quot;] }
+</code></pre>
+<p>No auth required; TLS-for-non-localhost still applies. Monitors should
+poll healthz (not a real endpoint) to avoid burning audit-log noise.
+<code>time_sync</code> returns <code>unknown</code> for the first 60 seconds after boot
+(uptime too short to tell), <code>degraded</code> if the wall clock is below 2023,
+otherwise <code>ok</code>.</p>
+<h3 id="version-is-a-stable-contract-field"><code>version</code> is a stable contract field</h3>
+<p>The <code>version</code> field returned by <code>/healthz</code> is the canonical
+version-skew probe. It carries the installed uapi package version (same
+string as <code>/usr/share/uapi/VERSION</code>) and is guaranteed to be present
+across every release within and across majors. Clients that need to
+detect API-skew before issuing real requests should read it from
+<code>/healthz</code> rather than parsing it from the URL or assuming it from the
+package they installed.</p>
+<h2 id="insecure-test-bypass">Insecure-test bypass</h2>
+<p>For closed-network testing only, creating <code>/etc/uapi.insecure</code> lets plain HTTP through from any client (the loopback bypass is always available; this opens it for remote hosts too). Every request that takes the bypass emits a syslog <code>NOTICE</code> line:</p>
+<pre><code>uapi-insecure-bypass &lt;request_id&gt; &lt;method&gt; &lt;path&gt; status=&lt;n&gt; remote=&lt;addr&gt;
+</code></pre>
+<p>so it shows up in <code>logread</code> and any remote-syslog collector. Delete the marker for production use.</p>
+<h2 id="capacity">Capacity</h2>
+<p>uapi runs in-process inside uhttpd via uhttpd-mod-ucode. Each request is a forked CGI child. On low-end MIPS hardware, fork+ucode+ubus is in the tens of milliseconds per request; on modern aarch64/x86_64 it is sub-10ms. The intended workload is Terraform applies plus occasional curl, not high-volume RPC. If you need RPS in the hundreds, front uapi with a caching reverse proxy.</p>
+<h2 id="backups">Backups</h2>
+<p>The token store at <code>/etc/config/uapi</code> is the only uapi-specific state worth backing up beyond what you'd back up for OpenWrt itself (<code>sysupgrade --create-backup</code>). Treat it as a secret. The tokens within are hashed (so a leaked backup file doesn't directly expose bearers), but the salts + hashes still allow an offline brute-force on weak inputs; in practice the bearers are 128 random bits so brute force is infeasible, but discipline still wins.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/operations.md</code> at tag <code>v2.5.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v2.5.1/docs/operations.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
