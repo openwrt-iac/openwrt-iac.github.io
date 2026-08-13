@@ -25,7 +25,7 @@
     <h2>Three steps</h2>
     <div class="version-picker">
   <label for="uapi-version">Version to install</label>
-  <select id="uapi-version"><option value="2.5.1" selected>2.5.1 (current)</option><option value="1.2.1">1.2.1</option></select>
+  <select id="uapi-version"><option value="3.0.0" selected>3.0.0 (current)</option><option value="2.5.1">2.5.1</option><option value="1.2.1">1.2.1</option></select>
 </div>
 <script>
   document.getElementById("uapi-version").addEventListener("change", function (e) {
@@ -35,7 +35,7 @@
   });
 </script>
 
-    <div class="version-steps" data-version="2.5.1">
+    <div class="version-steps" data-version="3.0.0">
     <ol>
       <li>
         <strong>Trust the feed signing key</strong>
@@ -60,10 +60,28 @@ apk update</code></pre>
       (currently uapi and unbound-uci-ext). Subsequent
       <code>apk add &lt;package&gt;</code> calls find them without further
       setup. Pin this exact build with
-      <code>apk add uapi=2.5.1-r1</code>.
+      <code>apk add uapi=3.0.0-r1</code>.
     </p>
     </div>
-    <div class="version-steps" data-version="1.2.1" hidden>
+    <div class="version-steps" data-version="2.5.1" hidden>
+  <ol>
+    <li>
+      <strong>Download the release</strong>
+<pre><code>wget https://github.com/openwrt-iac/uapi/releases/download/v2.5.1/uapi-2.5.1-r1.apk \
+     -O /tmp/uapi-2.5.1.apk</code></pre>
+    </li>
+    <li>
+      <strong>Install it</strong>
+<pre><code>apk add --allow-untrusted /tmp/uapi-2.5.1.apk</code></pre>
+    </li>
+  </ol>
+  <p class="micro">
+    The feed serves the current release only, so this one comes from its GitHub
+    Release and needs no signing key or repository entry. It serves its API under
+    <code>/api/v2</code>, not <code>/api/v3</code>.
+  </p>
+</div>
+<div class="version-steps" data-version="1.2.1" hidden>
   <ol>
     <li>
       <strong>Download the release</strong>
@@ -78,7 +96,7 @@ apk update</code></pre>
   <p class="micro">
     The feed serves the current release only, so this one comes from its GitHub
     Release and needs no signing key or repository entry. It serves its API under
-    <code>/api/v1</code>, not <code>/api/v2</code>.
+    <code>/api/v1</code>, not <code>/api/v3</code>.
   </p>
 </div>
 
@@ -90,7 +108,7 @@ apk update</code></pre>
     <h2>What just happened</h2>
     <p>
       uapi installed under <code>/usr/share/uapi/</code>, registered
-      <code>/api/v2=/usr/share/uapi/main.uc</code> with uhttpd's
+      <code>/api/v3=/usr/share/uapi/main.uc</code> with uhttpd's
       <code>main</code> instance, and restarted uhttpd. The token store
       lives at <code>/etc/config/uapi</code> (a conffile - preserved across
       upgrades).
@@ -102,7 +120,7 @@ apk update</code></pre>
 # (the cleartext token is printed once - copy it)
 
 curl -H "Authorization: Bearer &lt;token&gt;" \
-     https://&lt;router&gt;/api/v2/system</code></pre>
+     https://&lt;router&gt;/api/v3/system</code></pre>
   </div>
 </section>
 

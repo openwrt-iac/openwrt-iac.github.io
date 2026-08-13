@@ -26,7 +26,7 @@
       <a class="btn" href="https://github.com/openwrt-iac/uapi">View on GitHub</a>
     </div>
     <p class="micro">
-      v2.5.1 - signed APK feed - MIT licensed - OpenWrt 25.12 +
+      v3.0.0 - signed APK feed - MIT licensed - OpenWrt 25.12 +
     </p>
   </div>
 </header>
@@ -97,7 +97,7 @@
 }
 
 provider "uapi" {
-  endpoint = "https://router.example.com/api/v2"
+  endpoint = "https://router.example.com/api/v3"
   token    = var.uapi_token       # mint with `uapi-token create`
 }
 
@@ -132,11 +132,11 @@ resource "uapi_firewall_rule" "ssh_mgmt" {
       <li>
         <strong>Use it</strong> from anywhere with HTTPS:
 <pre><code>curl -H "Authorization: Bearer $TOKEN" \
-  https://router/api/v2/firewall/rules
+  https://router/api/v3/firewall/rules
 
 curl -H "Authorization: Bearer $TOKEN" \
      -H 'Content-Type: application/json' \
-     -X POST https://router/api/v2/firewall/rules \
+     -X POST https://router/api/v3/firewall/rules \
      -d '{"name":"allow-mgmt","target":"ACCEPT",
           "match":{"src_zone":"lan","dest_port":[22]}}'</code></pre>
       </li>
@@ -146,11 +146,11 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 <section class="surface">
   <div class="container">
-    <h2>What ships in 2.5.1</h2>
+    <h2>What ships in 3.0.0</h2>
     <div class="surface-grid">
 
       <div>
-        <h3>49 curated resources</h3>
+        <h3>48 curated resources</h3>
         <ul>
           <li><code>network/</code> interfaces, devices, routes, rules, bridge-vlans, wireguard-peers</li>
           <li><code>firewall/</code> zones, rules, redirects, forwardings, defaults</li>
@@ -166,7 +166,7 @@ curl -H "Authorization: Bearer $TOKEN" \
         <h3>Generic raw passthrough</h3>
         <p>
           The long tail of OpenWrt config under
-          <code>/api/v2/raw/&lt;package&gt;/&lt;section&gt;</code>.
+          <code>/api/v3/raw/&lt;package&gt;/&lt;section&gt;</code>.
           Same atomic-transaction recipe, same auth + scope model,
           payloads pass through uci field names directly.
         </p>
