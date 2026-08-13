@@ -190,12 +190,17 @@ curl -H "Authorization: Bearer $TOKEN" \
 <section class="docs">
   <div class="container">
     <h2>Documentation</h2>
+    <p>
+      Rendered from the tag each release was cut from, so a page describes the version
+      you are running rather than whatever is on the main branch. Every set is at
+      <a href="/uapi/docs/">docs by release</a>.
+    </p>
     <ul class="docs-list">
-      <li><a href="https://github.com/openwrt-iac/uapi/blob/main/docs/architecture.md">architecture.md</a> - fork model, lock layout, transaction recipe, ETag derivation, where state lives</li>
-      <li><a href="https://github.com/openwrt-iac/uapi/blob/main/docs/security.md">security.md</a> - threat model, scope tree, TLS posture, audit shape</li>
-      <li><a href="https://github.com/openwrt-iac/uapi/blob/main/docs/migration-v1-to-v2.md">migration-v1-to-v2.md</a> - field renames, strict typing, new endpoints</li>
-      <li><a href="https://github.com/openwrt-iac/uapi/blob/main/docs/release-process.md">release-process.md</a> - signed tags, reproducible builds, SBOM</li>
-      <li><a href="https://github.com/openwrt-iac/uapi/blob/main/docs/roadmap.md">roadmap.md</a> - what's shipped, what's next, what's intentionally out of scope</li>
+      <li><a href="/uapi/docs/{{UAPI_VERSION}}/architecture.html">architecture</a> - fork model, lock layout, transaction recipe, ETag derivation, where state lives</li>
+      <li><a href="/uapi/docs/{{UAPI_VERSION}}/security.html">security</a> - threat model, scope tree, TLS posture, audit shape</li>
+      <li><a href="/uapi/docs/{{UAPI_VERSION}}/migration-v2-to-v3.html">migration v2 to v3</a> - the prefix move, removed fields, request and response schemas</li>
+      <li><a href="/uapi/docs/{{UAPI_VERSION}}/tokens.html">tokens</a> - minting, scopes, source-IP pinning, rate-limit overrides</li>
+      <li><a href="/uapi/docs/{{UAPI_VERSION}}/roadmap.html">roadmap</a> - what's shipped, what's next, what's intentionally out of scope</li>
       <li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">CHANGELOG.md</a> - per-release notes</li>
     </ul>
   </div>
