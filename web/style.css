@@ -322,3 +322,22 @@ footer a:hover { color: var(--accent); }
 .version-picker .version-steps {
     margin-top: 0.75rem;
 }
+
+/* Rendered docs pages. Long prose, so the measure is capped and code is allowed to scroll
+   rather than forcing the page to. */
+.docs-body { max-width: 52rem; }
+.docs-body h2 { margin-top: 2rem; }
+.docs-body h3 { margin-top: 1.5rem; }
+.docs-body pre {
+    overflow-x: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+.docs-body table { border-collapse: collapse; display: block; overflow-x: auto; }
+.docs-body th, .docs-body td {
+    border: 1px solid var(--rule);
+    padding: 0.35rem 0.6rem;
+    text-align: left;
+}
