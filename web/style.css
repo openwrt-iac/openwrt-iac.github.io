@@ -298,3 +298,27 @@ footer a:hover { color: var(--accent); }
     margin: 0.6rem 0 0;
 }
 .meta a { color: var(--accent); }
+
+/* Version picker on the install page. The only form control on the site, so it borrows the
+   card border and dim-text tokens rather than inheriting from a form baseline that does not
+   exist here. */
+.version-picker {
+    margin-top: 1.25rem;
+}
+.version-picker label {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-size: 0.85rem;
+    color: var(--fg-dim);
+}
+.version-picker select {
+    font: inherit;
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+    border: 1px solid var(--rule);
+    background: var(--bg-card);
+    color: var(--fg);
+}
+.version-picker .version-steps {
+    margin-top: 0.75rem;
+}

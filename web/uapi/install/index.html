@@ -76,16 +76,21 @@ curl -H "Authorization: Bearer &lt;token&gt;" \
   <div class="container">
     <h2>Upgrades and rollback</h2>
     <p>
-      <code>apk upgrade uapi</code> picks up new versions from this feed.
-      The token store is preserved. To pin a specific version:
-      <code>apk add uapi={{UAPI_APK_PIN}}</code>.
+      <code>apk upgrade uapi</code> picks up new releases from this feed. The
+      token store is preserved across upgrades.
     </p>
     <p>
-      Past versions stay on the feed indefinitely - you can downgrade if
-      a release breaks something for your config. See
+      The feed carries the current release only, so a downgrade does not come
+      from it. Pick a version below for its exact install steps; anything other
+      than the current release installs from its GitHub Release. A major bump
+      also moves the API prefix, so crossing one changes the URL your clients
+      call. See
       <a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">CHANGELOG</a>
       for per-release breaking-change notes.
     </p>
+    <div class="version-picker">
+      {{UAPI_VERSION_PICKER}}
+    </div>
   </div>
 </section>
 
