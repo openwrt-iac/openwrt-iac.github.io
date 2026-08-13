@@ -30,6 +30,20 @@ asset=$(gh release view "$tag" --repo openwrt-iac/uapi \
         --json assets --jq '.assets[].name | select(test("^uapi-.*\\.apk$"))' 2>/dev/null | head -1)
 apk_pin=$(printf '%s' "$asset" | sed -n 's/^uapi-\(.*\)\.apk$/\1/p')
 
+# The version picker. One entry per major's latest stable, newest first: that is the set an
+# operator might actually want, and the install steps differ between them because the feed
+# carries only the newest. Each entry's prefix comes from that tag's own spec rather than being
+# inferred from its major number.
+versions_json=$(python3 scripts/list_versions.py)
+[ -n "$versions_json" ] || { echo "[facts] version list came out empty" >&2; exit 1; }
+echo "[facts] versions: $(printf '%s' "$versions_json" | python3 -c 'import json,sys; print(" ".join(v["version"] + ("(feed)" if v["from_feed"] else "") for v in json.load(sys.stdin)))')"
+
+# Rendered ahead of time rather than assembled in the browser, so with scripting off the newest
+# version's steps are still the ones on the page.
+picker_file=$(mktemp)
+printf '%s' "$versions_json" | python3 scripts/render_picker.py > "$picker_file"
+[ -s "$picker_file" ] || { echo "[facts] picker render produced nothing" >&2; exit 1; }
+
 facts=$(python3 - "$spec" <<'PY'
 import json, sys, re
 d = json.load(open(sys.argv[1]))
@@ -64,6 +78,9 @@ UAPI_APK_PIN=${apk_pin:-}
 echo "[facts] uapi $UAPI_VERSION  prefix $UAPI_PREFIX  pin $UAPI_APK_PIN  resources $UAPI_RESOURCE_COUNT"
 
 find "$STAGING_DIR" -name '*.html' -type f | while read -r f; do
+	if grep -q '{{UAPI_VERSION_PICKER}}' "$f"; then
+		python3 scripts/inject.py "$f" '{{UAPI_VERSION_PICKER}}' "$picker_file"
+	fi
 	sed -i \
 		-e "s|{{UAPI_VERSION}}|$UAPI_VERSION|g" \
 		-e "s|{{UAPI_PREFIX}}|$UAPI_PREFIX|g" \
