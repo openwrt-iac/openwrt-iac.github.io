@@ -79,6 +79,10 @@ jobs:
           # 2. Pull the latest stable openapi.json -> /tmp/staging/api/.
           ./scripts/pull_openapi.sh
 
+          # Fills the {{UAPI_*}} placeholders in the staged HTML from the spec pull_openapi.sh
+          # just fetched, plus the apk pin from the release assets. Must follow it.
+          ./scripts/stamp_facts.sh
+
           # 3. Aggregate the apk feed. SIGN_KEY is materialised from the
           # secret here so the script never sees it on its filesystem
           # path more than necessary.
