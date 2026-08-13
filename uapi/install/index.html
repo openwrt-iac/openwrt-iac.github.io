@@ -76,16 +76,41 @@ curl -H "Authorization: Bearer &lt;token&gt;" \
   <div class="container">
     <h2>Upgrades and rollback</h2>
     <p>
-      <code>apk upgrade uapi</code> picks up new versions from this feed.
-      The token store is preserved. To pin a specific version:
-      <code>apk add uapi=2.5.1-r1</code>.
+      <code>apk upgrade uapi</code> picks up new releases from this feed. The
+      token store is preserved across upgrades.
     </p>
     <p>
-      Past versions stay on the feed indefinitely - you can downgrade if
-      a release breaks something for your config. See
+      The feed carries the current release only, so a downgrade does not come
+      from it. Pick a version below for its exact install steps; anything other
+      than the current release installs from its GitHub Release. A major bump
+      also moves the API prefix, so crossing one changes the URL your clients
+      call. See
       <a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">CHANGELOG</a>
       for per-release breaking-change notes.
     </p>
+    <div class="version-picker">
+      <label for="uapi-version">Version</label>
+<select id="uapi-version"><option value="2.5.1" selected>2.5.1 (current)</option><option value="1.2.1">1.2.1</option></select>
+<div class="version-steps" data-version="2.5.1">
+<p>Served by the signed feed, so apk resolves it directly:</p>
+<pre><code>apk add uapi</code></pre>
+<p>To pin this exact build: <code>apk add uapi=2.5.1-r1</code>. Serves its API under <code>/api/v2</code>.</p>
+</div>
+<div class="version-steps" data-version="1.2.1" hidden>
+<p>The feed carries only the current release, so fetch this one from its GitHub Release:</p>
+<pre><code>wget https://github.com/openwrt-iac/uapi/releases/download/v1.2.1/uapi-1.2.1-r1.apk -O /tmp/uapi-1.2.1.apk
+apk add --allow-untrusted /tmp/uapi-1.2.1.apk</code></pre>
+<p>Serves its API under <code>/api/v1</code>.</p>
+</div>
+<script>
+  document.getElementById("uapi-version").addEventListener("change", function (e) {
+    document.querySelectorAll(".version-steps").forEach(function (b) {
+      b.hidden = b.dataset.version !== e.target.value;
+    });
+  });
+</script>
+
+    </div>
   </div>
 </section>
 
