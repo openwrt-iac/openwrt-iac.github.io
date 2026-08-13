@@ -23,6 +23,8 @@
 <section class="quickstart">
   <div class="container">
     <h2>Three steps</h2>
+    {{UAPI_VERSION_SELECT}}
+    <div class="version-steps" data-version="{{UAPI_VERSION}}">
     <ol>
       <li>
         <strong>Trust the feed signing key</strong>
@@ -46,8 +48,11 @@ apk update</code></pre>
       The same feed serves every package under the openwrt-iac org
       (currently uapi and unbound-uci-ext). Subsequent
       <code>apk add &lt;package&gt;</code> calls find them without further
-      setup.
+      setup. Pin this exact build with
+      <code>apk add uapi={{UAPI_APK_PIN}}</code>.
     </p>
+    </div>
+    {{UAPI_OLDER_VERSIONS}}
   </div>
 </section>
 
@@ -81,16 +86,15 @@ curl -H "Authorization: Bearer &lt;token&gt;" \
     </p>
     <p>
       The feed carries the current release only, so a downgrade does not come
-      from it. Pick a version below for its exact install steps; anything other
-      than the current release installs from its GitHub Release. A major bump
+      from it. Use the version selector at the top of this page for an older
+      release's steps; anything other than the current release installs from its
+      GitHub Release. A major bump
       also moves the API prefix, so crossing one changes the URL your clients
       call. See
       <a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">CHANGELOG</a>
       for per-release breaking-change notes.
     </p>
-    <div class="version-picker">
-      {{UAPI_VERSION_PICKER}}
-    </div>
+
   </div>
 </section>
 
