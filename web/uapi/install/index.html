@@ -56,7 +56,7 @@ apk update</code></pre>
     <h2>What just happened</h2>
     <p>
       uapi installed under <code>/usr/share/uapi/</code>, registered
-      <code>/api/v2=/usr/share/uapi/main.uc</code> with uhttpd's
+      <code>{{UAPI_PREFIX}}=/usr/share/uapi/main.uc</code> with uhttpd's
       <code>main</code> instance, and restarted uhttpd. The token store
       lives at <code>/etc/config/uapi</code> (a conffile - preserved across
       upgrades).
@@ -68,7 +68,7 @@ apk update</code></pre>
 # (the cleartext token is printed once - copy it)
 
 curl -H "Authorization: Bearer &lt;token&gt;" \
-     https://&lt;router&gt;/api/v2/system</code></pre>
+     https://&lt;router&gt;{{UAPI_PREFIX}}/system</code></pre>
   </div>
 </section>
 
@@ -78,7 +78,7 @@ curl -H "Authorization: Bearer &lt;token&gt;" \
     <p>
       <code>apk upgrade uapi</code> picks up new versions from this feed.
       The token store is preserved. To pin a specific version:
-      <code>apk add uapi=2.0.0-r1</code>.
+      <code>apk add uapi={{UAPI_APK_PIN}}</code>.
     </p>
     <p>
       Past versions stay on the feed indefinitely - you can downgrade if
