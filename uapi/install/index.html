@@ -23,6 +23,19 @@
 <section class="quickstart">
   <div class="container">
     <h2>Three steps</h2>
+    <div class="version-picker">
+  <label for="uapi-version">Version to install</label>
+  <select id="uapi-version"><option value="2.5.1" selected>2.5.1 (current)</option><option value="1.2.1">1.2.1</option></select>
+</div>
+<script>
+  document.getElementById("uapi-version").addEventListener("change", function (e) {
+    document.querySelectorAll(".version-steps").forEach(function (b) {
+      b.hidden = b.dataset.version !== e.target.value;
+    });
+  });
+</script>
+
+    <div class="version-steps" data-version="2.5.1">
     <ol>
       <li>
         <strong>Trust the feed signing key</strong>
@@ -46,8 +59,29 @@ apk update</code></pre>
       The same feed serves every package under the openwrt-iac org
       (currently uapi and unbound-uci-ext). Subsequent
       <code>apk add &lt;package&gt;</code> calls find them without further
-      setup.
+      setup. Pin this exact build with
+      <code>apk add uapi=2.5.1-r1</code>.
     </p>
+    </div>
+    <div class="version-steps" data-version="1.2.1" hidden>
+  <ol>
+    <li>
+      <strong>Download the release</strong>
+<pre><code>wget https://github.com/openwrt-iac/uapi/releases/download/v1.2.1/uapi-1.2.1-r1.apk \
+     -O /tmp/uapi-1.2.1.apk</code></pre>
+    </li>
+    <li>
+      <strong>Install it</strong>
+<pre><code>apk add --allow-untrusted /tmp/uapi-1.2.1.apk</code></pre>
+    </li>
+  </ol>
+  <p class="micro">
+    The feed serves the current release only, so this one comes from its GitHub
+    Release and needs no signing key or repository entry. It serves its API under
+    <code>/api/v1</code>, not <code>/api/v2</code>.
+  </p>
+</div>
+
   </div>
 </section>
 
@@ -81,36 +115,15 @@ curl -H "Authorization: Bearer &lt;token&gt;" \
     </p>
     <p>
       The feed carries the current release only, so a downgrade does not come
-      from it. Pick a version below for its exact install steps; anything other
-      than the current release installs from its GitHub Release. A major bump
+      from it. Use the version selector at the top of this page for an older
+      release's steps; anything other than the current release installs from its
+      GitHub Release. A major bump
       also moves the API prefix, so crossing one changes the URL your clients
       call. See
       <a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">CHANGELOG</a>
       for per-release breaking-change notes.
     </p>
-    <div class="version-picker">
-      <label for="uapi-version">Version</label>
-<select id="uapi-version"><option value="2.5.1" selected>2.5.1 (current)</option><option value="1.2.1">1.2.1</option></select>
-<div class="version-steps" data-version="2.5.1">
-<p>Served by the signed feed, so apk resolves it directly:</p>
-<pre><code>apk add uapi</code></pre>
-<p>To pin this exact build: <code>apk add uapi=2.5.1-r1</code>. Serves its API under <code>/api/v2</code>.</p>
-</div>
-<div class="version-steps" data-version="1.2.1" hidden>
-<p>The feed carries only the current release, so fetch this one from its GitHub Release:</p>
-<pre><code>wget https://github.com/openwrt-iac/uapi/releases/download/v1.2.1/uapi-1.2.1-r1.apk -O /tmp/uapi-1.2.1.apk
-apk add --allow-untrusted /tmp/uapi-1.2.1.apk</code></pre>
-<p>Serves its API under <code>/api/v1</code>.</p>
-</div>
-<script>
-  document.getElementById("uapi-version").addEventListener("change", function (e) {
-    document.querySelectorAll(".version-steps").forEach(function (b) {
-      b.hidden = b.dataset.version !== e.target.value;
-    });
-  });
-</script>
 
-    </div>
   </div>
 </section>
 
