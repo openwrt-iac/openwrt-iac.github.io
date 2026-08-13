@@ -40,9 +40,22 @@ echo "[facts] versions: $(printf '%s' "$versions_json" | python3 -c 'import json
 
 # Rendered ahead of time rather than assembled in the browser, so with scripting off the newest
 # version's steps are still the ones on the page.
-picker_file=$(mktemp)
-printf '%s' "$versions_json" | python3 scripts/render_picker.py > "$picker_file"
-[ -s "$picker_file" ] || { echo "[facts] picker render produced nothing" >&2; exit 1; }
+select_file=$(mktemp)
+older_file=$(mktemp)
+printf '%s' "$versions_json" | python3 scripts/render_picker.py select > "$select_file"
+printf '%s' "$versions_json" | python3 scripts/render_picker.py older  > "$older_file"
+[ -s "$select_file" ] || { echo "[facts] version select rendered empty" >&2; exit 1; }
+[ -s "$older_file" ]  || { echo "[facts] older-version blocks rendered empty" >&2; exit 1; }
+
+# The Terraform provider's own version, for the HCL snippet on the landing page. It tracks uapi's
+# majors, so a hand-written constraint goes wrong exactly when uapi's does: "~> 2.1" still
+# resolves today, but it excludes the provider's next major outright.
+provider_tag=$(gh release list --repo openwrt-iac/terraform-provider-uapi \
+               --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
+UAPI_PROVIDER_CONSTRAINT=$(printf '%s' "$provider_tag" \
+                           | sed -n 's/^v\([0-9]\+\)\.\([0-9]\+\)\..*$/~> \1.\2/p')
+[ -n "$UAPI_PROVIDER_CONSTRAINT" ] || { echo "[facts] could not derive the provider constraint from '$provider_tag'" >&2; exit 1; }
+echo "[facts] provider $provider_tag -> constraint '$UAPI_PROVIDER_CONSTRAINT'"
 
 facts=$(python3 - "$spec" <<'PY'
 import json, sys, re
@@ -78,14 +91,16 @@ UAPI_APK_PIN=${apk_pin:-}
 echo "[facts] uapi $UAPI_VERSION  prefix $UAPI_PREFIX  pin $UAPI_APK_PIN  resources $UAPI_RESOURCE_COUNT"
 
 find "$STAGING_DIR" -name '*.html' -type f | while read -r f; do
-	if grep -q '{{UAPI_VERSION_PICKER}}' "$f"; then
-		python3 scripts/inject.py "$f" '{{UAPI_VERSION_PICKER}}' "$picker_file"
+	if grep -q '{{UAPI_VERSION_SELECT}}' "$f"; then
+		python3 scripts/inject.py "$f" '{{UAPI_VERSION_SELECT}}' "$select_file"
+		python3 scripts/inject.py "$f" '{{UAPI_OLDER_VERSIONS}}' "$older_file"
 	fi
 	sed -i \
 		-e "s|{{UAPI_VERSION}}|$UAPI_VERSION|g" \
 		-e "s|{{UAPI_PREFIX}}|$UAPI_PREFIX|g" \
 		-e "s|{{UAPI_APK_PIN}}|$UAPI_APK_PIN|g" \
 		-e "s|{{UAPI_RESOURCE_COUNT}}|$UAPI_RESOURCE_COUNT|g" \
+		-e "s|{{UAPI_PROVIDER_CONSTRAINT}}|$UAPI_PROVIDER_CONSTRAINT|g" \
 		"$f"
 done
 

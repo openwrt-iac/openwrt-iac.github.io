@@ -91,7 +91,7 @@
   required_providers {
     uapi = {
       source  = "openwrt-iac/uapi"
-      version = "~&gt; 2.1"
+      version = "{{UAPI_PROVIDER_CONSTRAINT}}"
     }
   }
 }
@@ -146,7 +146,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 <section class="surface">
   <div class="container">
-    <h2>What ships in 2.1</h2>
+    <h2>What ships in {{UAPI_VERSION}}</h2>
     <div class="surface-grid">
 
       <div>
