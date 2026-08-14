@@ -120,6 +120,36 @@
           <a href="https://github.com/openwrt-iac/terraform-provider-uapi">github</a>
         </p>
       </div>
+      <div>
+        <h3><a href="https://github.com/openwrt-iac/luci-app-uapi">luci-app-uapi</a> - the same surface, in LuCI</h3>
+        <p>
+          A LuCI interface for uapi: status, settings and token management. It
+          talks to uapi over HTTP like any other client, so it can only do what
+          the operator's token permits, and it is optional: uapi does not depend
+          on it. Useful for minting a first token and seeing what the API reports
+          without leaving the router's web UI.
+        </p>
+        <p class="meta">
+          <a href="https://github.com/openwrt-iac/luci-app-uapi">github</a> -
+          <code>apk add luci-app-uapi</code>
+        </p>
+      </div>
+
+      <div>
+        <h3><a href="https://github.com/openwrt-iac/apply-confirm">apply-confirm</a> - a deadline on a risky change</h3>
+        <p>
+          Stage a uci change with a deadline: if nobody confirms before it
+          expires, the box rolls back, and the timer survives a reboot. The
+          answer to locking yourself out with a firewall or network edit applied
+          remotely. Early, at 0.1.0, and independent of uapi: it works for
+          anything that writes uci.
+        </p>
+        <p class="meta">
+          <a href="https://github.com/openwrt-iac/apply-confirm">github</a> -
+          <code>apk add apply-confirm</code>
+        </p>
+      </div>
+
 
     </div>
   </div>
