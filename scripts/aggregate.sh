@@ -33,7 +33,10 @@ printf '%s\n' "$records" | while IFS="	" read -r repo pattern; do
   echo "[aggregate] $repo  pattern=$pattern"
   # gh release list with --exclude-pre-releases filters at the source. If a
   # source has no stable release yet, skip it without failing the whole run.
-  latest=$(gh release list --repo "$repo" --exclude-pre-releases --limit 1 \
+  # --exclude-drafts matters as much: a deleted tag reverts its release to a draft,
+  # and a token that can see drafts would otherwise feed an unpublished build to
+  # every operator on the feed.
+  latest=$(gh release list --repo "$repo" --exclude-pre-releases --exclude-drafts --limit 1 \
            --json tagName --jq '.[0].tagName // ""' 2>/dev/null || true)
   if [ -z "$latest" ]; then
     echo "[aggregate]   no stable release on $repo, skipping"
