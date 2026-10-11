@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Installation - uapi 3.0.0 docs</title>
+<title>Installation - uapi 3.1.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.0.0 / Installation</p>
+       <a href="/uapi/docs/">docs</a> / 3.1.0 / Installation</p>
   </div>
 </header>
 
@@ -65,7 +65,12 @@ sees success and no new version and is likely to conclude the feed is stale.
 &lt;file.apk&gt;</code>, the local-file form at the top of this page, does upgrade: it
 installs the version in that file whether or not an older one is present.</p>
 <p>The feed carries <strong>stable releases only</strong>. Release candidates (<code>-rc</code>, <code>-alpha</code>, <code>-beta</code>, <code>-pre</code>) are intentionally excluded so that <code>apk add uapi</code> and <code>apk upgrade uapi</code> never resolve to a not-yet-ready build. RC APKs land on the GitHub Release page (marked Pre-release); to install one, download it manually and <code>apk add --allow-untrusted /tmp/uapi-&lt;rc&gt;.apk</code>.</p>
-<p>Every stable release stays available indefinitely, so pinning works: <code>apk add 'uapi&lt;3.0.0'</code> holds a client to the v2 wire contract, and <code>apk add uapi=&lt;version&gt;-r1</code> pins an exact build. <code>CHANGELOG.md</code> and the GitHub Releases page are the sources of truth for what the current line is; this page deliberately does not name it, because a version written here goes stale the moment the next one ships.</p>
+<p><strong>Installing from a file pins the package, and nothing tells you.</strong> <code>apk add &lt;file&gt;.apk</code> writes a checksum-pinned entry into <code>/etc/apk/world</code>, of the form <code>uapi&gt;&lt;Q1zxo621V...=</code>, which holds that exact build. <code>apk upgrade</code> then silently leaves uapi alone: no error, no mention in the output, the version simply never moves. Restore feed tracking with</p>
+<pre><code class="language-sh">apk add uapi        # replaces the pinned world entry with a plain `uapi`
+apk upgrade         # now resolves the feed's current release
+</code></pre>
+<p><code>grep uapi /etc/apk/world</code> shows which state a box is in: a bare <code>uapi</code> tracks the feed, anything with a <code>&gt;&lt;Q1...</code> suffix is pinned to one build. This is why a router that dogfooded an RC keeps reporting the RC long after a stable release exists.</p>
+<p>The feed carries the <strong>current stable release only</strong>: the index is rebuilt from the latest stable tag each publish, so the previous version's APK stops resolving the moment a new one ships. <code>apk add uapi=&lt;version&gt;-r1</code> therefore pins an exact build only while that build is the current one, and a constraint like <code>apk add 'uapi&lt;3.0.0'</code> will not find an older release once it has rolled off. Older releases stay on the GitHub Releases page permanently, and installing one from there is the supported way back, subject to the pinning note above. <code>CHANGELOG.md</code> and the GitHub Releases page are the sources of truth for what the current line is; this page deliberately does not name it, because a version written here goes stale the moment the next one ships.</p>
 <h2 id="tls">TLS</h2>
 <p>uapi inherits TLS from the <code>main</code> uhttpd instance. By default OpenWrt ships a self-signed certificate (regenerated at first boot via <code>px5g</code>); browsers and curl complain, and over a real network this is <strong>not adequate</strong>. Two well-trodden options on OpenWrt:</p>
 <ul>
@@ -104,8 +109,8 @@ uci commit uhttpd
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/installation.md</code> at tag <code>v3.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/installation.md">repository</a>, never here.
+      Rendered from <code>docs/installation.md</code> at tag <code>v3.1.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/installation.md">repository</a>, never here.
     </p>
   </div>
 </footer>

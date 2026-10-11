@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Non-uci state: what uapi covers and what it doesn&#x27;t - uapi 3.0.0 docs</title>
+<title>Non-uci state: what uapi covers and what it doesn&#x27;t - uapi 3.1.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.0.0 / Non-uci state: what uapi covers and what it doesn&#x27;t</p>
+       <a href="/uapi/docs/">docs</a> / 3.1.0 / Non-uci state: what uapi covers and what it doesn&#x27;t</p>
   </div>
 </header>
 
@@ -79,13 +79,21 @@
 <td>none</td>
 <td>dropbear re-reads the file per connection</td>
 </tr>
+<tr>
+<td><code>system/cron_jobs</code></td>
+<td><code>/etc/crontabs/root</code> (mode 0600)</td>
+<td><code>with_lock</code> on global for writes; reads lock-free</td>
+<td><code>cron</code></td>
+<td>one entry per line; other lines stay byte for byte</td>
+</tr>
 </tbody>
 </table>
 <p>Each entry below expands on its lock semantics, audit shape, the file/process it touches, and why the standard uci-transaction recipe doesn't apply.</p>
 <p>Adding a non-uci resource means adding a row above. The bar is high: prefer driving the underlying daemon's uci surface if the option exists, or upstreaming the option to OpenWrt uci if it doesn't, before adding non-uci state to uapi.</p>
 <h3 id="packagesinstalled"><code>packages/installed</code></h3>
 <ul>
-<li><strong>Source of truth.</strong> The apk database. Reads enumerate via <code>apk info</code> (apk-tools 3.x returns nothing for <code>--installed</code>); writes shell out to <code>apk add &lt;name&gt;</code> and <code>apk del &lt;name&gt;</code> via <code>fs.popen</code>.</li>
+<li><strong>Source of truth.</strong> The apk database. Reads enumerate via <code>apk info</code> (apk-tools 3.x returns nothing for <code>--installed</code>); writes shell out to <code>apk add &lt;name&gt;</code> and <code>apk del &lt;name&gt;</code> via <code>fs.popen</code>. A single package's version comes from <code>apk query --from installed --format json</code>, because the <code>&lt;name&gt;-&lt;version&gt;</code> line of <code>apk info</code> cannot be split right for a name that ends in a dash and digits.</li>
+<li><strong>Index refresh.</strong> <code>apk add</code> refreshes a feed index only when its cached copy is older than 4 hours, or missing, as after a reboot (the cache is under <code>/var/cache/apk</code>, on tmpfs). Inside that window a feed can rebuild a package in place (<code>-r2</code> to <code>-r3</code>) and drop the old file, so the cached index names a download that 404s, or it can add a package the cached index does not list. When <code>apk add</code> fails, uapi runs <code>apk update</code> and tries <code>apk add</code> once more, and the second result is the one reported. The retry runs even when <code>apk update</code> fails, because it exits with the number of feeds it could not refresh: one unreachable feed makes it fail after it has refreshed all the others. A successful install costs nothing extra. A failure that a refresh cannot fix, such as a bad name, pays for one refresh before it is reported. Read-only apk commands (<code>apk search</code>, <code>apk fetch</code>, any <code>--simulate</code>) never refresh, so they can show a stale index that <code>apk add</code> would refresh.</li>
 <li><strong>Lock.</strong> <code>transaction.with_lock</code> on <code>/var/lock/uapi.lock</code>. apk has its own DB lock; the uapi flock serialises concurrent uapi requests so they don't race apk-vs-apk and surface as nondeterministic <code>5xx</code>s. Contention returns <code>423 locked</code> with <code>Retry-After: 1</code>.</li>
 <li><strong>Reload.</strong> None at the uapi layer. Each package's postinst runs as root and is responsible for wiring whatever the package installs (uci defaults, init scripts, etc.).</li>
 <li><strong>Validation.</strong> Package name must match <code>^[A-Za-z0-9_+][A-Za-z0-9_+.-]*$</code>. Names starting with <code>-</code> or <code>.</code> are rejected to prevent apk-flag injection (<code>--allow-untrusted</code>, <code>--repository=...</code>); the shell-out also uses <code>apk add -- &lt;name&gt;</code> as a defense-in-depth separator.</li>
@@ -128,19 +136,37 @@
 <ul>
 <li><strong>Source of truth.</strong> <code>/etc/dropbear/authorized_keys</code> (mode 0600).</li>
 <li><strong>Lock.</strong> <code>transaction.with_lock</code> for writes; reads are lock-free.</li>
-<li><strong>Mechanism.</strong> Direct file I/O. dropbear re-reads the file on every connection so no reload is needed.</li>
+<li><strong>Mechanism.</strong> Direct file I/O. dropbear re-reads the file on every connection so no reload is needed. A file that exists but cannot be read fails the request with <code>500</code>: reading it as empty would let an add or a remove rewrite it with only its own keys, and lock root out of SSH.</li>
 <li><strong>Validation.</strong> Server-side parse of each key line as <code>&lt;type&gt; &lt;base64-blob&gt; [comment]</code>. Allowed types: <code>ssh-rsa</code>, <code>ssh-ed25519</code>, <code>ecdsa-sha2-nistp{256,384,521}</code>, <code>sk-ssh-ed25519@openssh.com</code>, <code>sk-ecdsa-sha2-nistp256@openssh.com</code>. Options blocks (<code>command="..."</code>, <code>no-pty</code>, etc.) before the key type are stripped from the canonical form.</li>
 <li><strong>Stable id.</strong> The first 12 hex characters of the blob's sha256, matching <code>^[a-f0-9]{12}$</code>. Same key always gets the same id, idempotent across re-adds.</li>
 <li><strong>HTTP shape.</strong> <code>GET</code> lists; <code>POST</code> adds one; <code>PUT</code> replaces wholesale (dedup); <code>DELETE /&lt;id&gt;</code> removes one.</li>
 <li><strong>Why not uci.</strong> OpenWrt has no uci wrapper for SSH authorized keys. LuCI also writes the file directly via its rpcd <code>fs</code> plugin.</li>
 </ul>
+<h3 id="systemcron_jobs"><code>system/cron_jobs</code></h3>
+<ul>
+<li><strong>Source of truth.</strong> <code>/etc/crontabs/root</code>, read by busybox crond. Other users' crontabs are out of scope.</li>
+<li><strong>Lock.</strong> <code>transaction.with_lock</code> for writes. Reads are lock-free.</li>
+<li><strong>Mechanism.</strong> The write reads the file, adds or removes its own line, and puts the result in place with the same 0600 temp-file-and-rename as <code>authorized_keys</code>. Every other line stays byte for byte: entries from packages, comments, and <code>MAILTO=</code>, <code>SHELL=</code> and <code>PATH=</code> lines. An appended entry goes at the end, so an environment line earlier in the file applies to it. A crontab that exists but cannot be read fails the request with <code>500</code>, because treating it as empty would let the write replace every line in it.</li>
+<li><strong>Line continuation.</strong> crond joins a line that ends in <code>\</code> with the next one, and drops the backslash, before it looks for <code>#</code>. Measured on the device: <code>touch /tmp/c1 \</code> followed by <code>/tmp/c2</code> ran <code>touch /tmp/c1 /tmp/c2</code>, and a comment that ends in <code>\</code> hid the entry below it. uapi reads the file in the same groups. A delete removes every physical line of its entry, and an append after a trailing backslash first adds a blank line, which ends the continuation without changing what crond reads for the line before.</li>
+<li><strong>Reload.</strong> <code>/etc/init.d/cron reload</code>. The init script registers each crontab with procd as a watched file, so the reload restarts crond only when the content changed. It is also what starts crond on a stock image: there is no crontab there, and the init script does not start crond while <code>/etc/crontabs/</code> is empty. A failed reload puts the old file back and reloads again, and the request answers <code>reload_failed_restored</code> or <code>reload_failed_unrecovered</code>, as a curated write does. Removing the last entry leaves an empty file, so crond keeps running with nothing to do.</li>
+<li><strong>Effect.</strong> <code>runtime.crond_running</code> asks procd whether crond runs, on every read and after every write, delete included. The reload exit status cannot tell: with an invalid <code>system.cronloglevel</code> the init script prints "validation failed", exits 0, and procd stops crond. A write in that state answers 200 with <code>crond_running: false</code>. uapi does not know whether a job ran, and does not claim to.</li>
+<li><strong>Reads list what crond runs.</strong> A line is parsed the way busybox crond reads it on OpenWrt: continuations are joined, <code>#</code> ends the line wherever it appears, environment lines and lines short of five fields plus a command are skipped, and field spacing collapses. A line from another writer therefore shows up as crond sees it, which is not always how it looks. Where its schedule is one crond misreads, such as minute <code>75</code> or weekday <code>7</code>, the entry says so with <code>runtime.runs_as_written: false</code>.</li>
+<li><strong>Validation.</strong> Writes accept only what crond runs as written, and refuse an undeclared body field with <code>unknown_field</code>. busybox crond does not refuse a bad field: it logs a parse error and keeps the line with a half-filled schedule, so minute <code>75</code> runs every minute and weekday <code>7</code> runs every day. The schedule is five fields separated by single spaces, each a list of values, ranges (wrapping ones such as <code>22-2</code> included) and <code>*</code>, with a <code>/step</code> after <code>*</code> or a range. Ranges: minute 0-59, hour 0-23, day 1-31, month 1-12 or <code>jan</code>-<code>dec</code>, weekday 0-6 or <code>sun</code>-<code>sat</code>. Refused, each for a reason crond gives:</li>
+<li><code>@daily</code>, <code>@reboot</code> and the other special schedules. OpenWrt builds busybox without <code>FEATURE_CROND_SPECIAL_TIMES</code>: crond skips a short <code>@daily</code> line and misreads a long one.</li>
+<li>A step on a single value. busybox reads <code>5/10</code> as 5 alone, and other crons read it as <code>5-59/10</code> or refuse it.</li>
+<li><code>*/N</code> in the day field. busybox fills <code>*</code> for days from day 0, so <code>*/2</code> runs on days 2 to 30 where other crons run on days 1 to 31, and it ORs such a day with a restricted weekday where other crons AND them. <code>1-31/N</code> means the same everywhere.</li>
+<li><code>#</code> in the command. crond cuts the line there: <code>touch /tmp/a#b</code> runs <code>touch /tmp/a</code>.</li>
+<li>A command that ends in <code>\</code>, which joins the next line into it.</li>
+<li>Control characters in the command, and whitespace at either end, which crond strips.</li>
+<li><strong><code>%</code>.</strong> busybox crond gives it no special meaning, so it passes through to the shell unchanged.</li>
+<li><strong>Stable id.</strong> The first 12 hex characters of <code>sha256("&lt;schedule&gt; &lt;command&gt;")</code>. A change to either field gives a new id, so an update is a delete plus a create. Identical lines share an id: a read lists them once, and a delete removes them all.</li>
+<li><strong>HTTP shape.</strong> <code>GET</code> lists, <code>POST</code> adds one, and <code>DELETE /&lt;id&gt;</code> removes one and answers <code>200</code> with the removed entry and crond's state after the reload. There is no <code>PUT</code> for the whole file, although that is how LuCI edits it (one textarea, saved whole). Packages write to the same file: <code>acme</code> adds <code>0 0 * * * /etc/init.d/acme renew</code> each time it starts, and <code>safe-search</code> and <code>wg-installer</code> add their own lines. A client that owned the whole file would delete those lines, and the packages would add them back on their next start.</li>
+<li><strong>Read exposure.</strong> A read returns every command in full, to any token with <code>system:cron_jobs:ro</code> or a scope above it, <code>*:ro</code> included. A command can carry a credential, so keep secrets in a 0600 file that the command reads. The command stays readable because a client cannot adopt or compare an entry it cannot see.</li>
+<li><strong>Audit.</strong> A create emits <code>uapi-cron-job-add &lt;request_id&gt; id=&lt;id&gt;</code>, which ties the generic write line to the entry it made. The command is not logged, since commands can carry credentials.</li>
+<li><strong>Why not uci.</strong> OpenWrt has no uci surface for cron entries. The only cron option in uci is <code>system.cronloglevel</code>, and busybox crond reads only crontab files. LuCI writes the file directly too.</li>
+</ul>
 <h2 id="out-of-scope-state">Out-of-scope state</h2>
 <p>The following items are real configuration concerns that uapi deliberately does NOT cover. For each, the recommended out-of-band path is listed. An IaC orchestrator typically wires these once at image-bake time (cloud-init / <code>/etc/uci-defaults/</code>) rather than reaching for them on every reconcile.</p>
-<h3 id="unbound-listen-address-binding">Unbound listen-address binding</h3>
-<ul>
-<li><strong>Why excluded.</strong> OpenWrt's <code>unbound</code> uci has no clean option for binding the recursive server to a specific address (e.g. loopback-only). The upstream init script emits <code>interface-automatic: yes</code> unconditionally when <code>interface_auto=1</code>; there is no uci path that produces an <code>interface: 127.0.0.1</code> line. uapi's <code>unbound/server</code> resource curates every uci option the upstream init script actually consumes, but it deliberately does not invent an option that uci doesn't expose.</li>
-<li><strong>Recommended path.</strong> Drop your overrides into <code>/etc/unbound/unbound_srv.conf</code> (auto-included inside the <code>server:</code> clause), or set <code>manual_conf=1</code> via <code>PATCH /api/v3/unbound/server</code> and write the full <code>/etc/unbound/unbound.conf</code> yourself. The <code>unbound_srv.conf</code> file ships as a stub from the upstream package precisely for this use.</li>
-</ul>
 <h3 id="serial-console-inittab">Serial console / inittab</h3>
 <ul>
 <li><strong>Why excluded.</strong> <code>/etc/inittab</code> is not uci.</li>
@@ -181,8 +207,8 @@
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/non-uci-state.md</code> at tag <code>v3.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/non-uci-state.md">repository</a>, never here.
+      Rendered from <code>docs/non-uci-state.md</code> at tag <code>v3.1.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/non-uci-state.md">repository</a>, never here.
     </p>
   </div>
 </footer>

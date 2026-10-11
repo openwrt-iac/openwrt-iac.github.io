@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi release process - uapi 3.0.0 docs</title>
+<title>uapi release process - uapi 3.1.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.0.0 / uapi release process</p>
+       <a href="/uapi/docs/">docs</a> / 3.1.0 / uapi release process</p>
   </div>
 </header>
 
@@ -105,7 +105,7 @@ install one download the APK from the release page and
 <code>apk add --allow-untrusted /tmp/uapi-&lt;rc&gt;.apk</code> deliberately. Same
 path the maintainer uses to dogfood the RC on the live router.</p>
 <p>Announce the RC explicitly to known downstream consumers - the
-<code>raspbeguy/uapi</code> Terraform provider author, anyone with a published
+<code>openwrt-iac/uapi</code> Terraform provider author, anyone with a published
 client - and give them a ~1-2 week window to file wire-surface
 feedback. Promote <code>rc&lt;N&gt;</code> to the final <code>vX.0.0</code> only after the window
 closes with no fundamental issues outstanding. v2.0.0 went straight to
@@ -119,8 +119,13 @@ polish".</p>
    (<code>v2.0.0-rc1</code>). For patch releases, just work on a topic branch.</li>
 <li><strong>Update <code>VERSION</code></strong> to the target value. <strong>Regenerate</strong> the OpenAPI:
    <code>make openapi</code>. Commit.</li>
-<li><strong>Update <code>CHANGELOG.md</code></strong> with the section for the new version. Even
-   for <code>rc</code> releases. Commit.</li>
+<li><strong>Close the changelog section.</strong> Run <code>scripts/changelog-missing.sh
+   &lt;previous-tag&gt;</code> and fix whatever it lists. Then rename <code>## [Unreleased]</code>
+   to <code>## [x.y.z] - &lt;date&gt;</code>, and put an empty <code>## [Unreleased]</code> above it.
+   Do this for <code>rc</code> releases too. A final release after RCs gets a short
+   section of its own that points at the RC sections, as 3.0.0 does. The
+   release PR takes the <code>changelog-not-needed</code> label, because it moves
+   entries rather than adds one. Commit.</li>
 <li><strong>Run the full test suite locally</strong>: <code>make test coverage</code>. The CI runs
    <code>make lint test-unit coverage</code> plus the integration / soak / bench
    suite, so a green local <code>make test coverage</code> is necessary but not
@@ -182,15 +187,35 @@ gh release upload v2.0.0 build/sbom.spdx.json --clobber
 (<code>uhttpd</code>, <code>uhttpd-mod-ucode</code>, etc.), and the package itself with the
 built APK's verification sha256. Operators using SBOM-aware deployment
 tooling (cosign, syft, etc.) can consume it directly.</p>
-<h2 id="auto-changelog">Auto-CHANGELOG</h2>
-<p><code>CHANGELOG.md</code> is hand-curated, not auto-generated. The generator-driven
-approach (<code>tools/gen_changelog.sh</code> against <code>git log --format='%s'
-&lt;prev-tag&gt;..HEAD</code>) was considered for v2 and rejected: hand-written
-changelog entries are more useful to operators (they explain <em>why</em>, not
-just <em>what</em>) and the project's commit-subject convention is consistent
-enough that an auto-generator would mostly produce
-a list of <code>feat:</code> / <code>fix:</code> lines that any reader could compose from
-<code>git log</code> directly.</p>
+<h2 id="changelog">Changelog</h2>
+<p><code>CHANGELOG.md</code> follows <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>: an
+<code>## [Unreleased]</code> section at the top, and one section per release below it. The process is the
+one Grafana Mimir uses: each PR writes its own entry, and CI checks that it did.</p>
+<p><strong>Every PR records its change in the same PR.</strong> It adds an entry under <code>## [Unreleased]</code>, in the
+heading that fits: <code>Added</code>, <code>Changed</code>, <code>Deprecated</code>, <code>Removed</code>, <code>Fixed</code>, <code>Security</code>, or
+<code>Internal</code> for release and build machinery. The entry ends with the PR number in parentheses,
+for example <code>(#193)</code>. <code>.github/workflows/changelog.yml</code> runs <code>scripts/changelog-has-entry.sh</code>
+and fails the PR when no entry under <code>## [Unreleased]</code> carries its number.</p>
+<p><strong>An entry is needed for every change that someone outside the repo can see:</strong> the wire
+surface, the behavior on the router, the package, or the release artifacts (APK, SBOM, GitHub
+Release). A PR that changes none of these takes the <code>changelog-not-needed</code> label instead, and
+the check skips it. That covers docs, tests, CI that changes no artifact, refactors, and release
+PRs.</p>
+<p><strong>The entry says why, not only what.</strong> It names the defect or the need, what changed on the
+wire, and what a client must do, if anything. A breaking change opens with <code>BREAKING:</code>. A
+tightening under a carve-out in <code>docs/versioning.md</code> names the carve-out and says how loudly it
+fails. This is why entries are not generated from PR titles, as release-please does in Grafana
+Loki and Alloy: a title cannot carry that.</p>
+<p><strong>The PR number exists only once the PR does.</strong> Either open the PR and then push the entry, or
+predict the number with <code>scripts/next-pr-number.sh</code> before you open it. Issues and PRs share one
+counter, so the guess is wrong if an issue opens in between, and the check then fails until the
+entry carries the real number.</p>
+<p><strong>At release time,</strong> <code>scripts/changelog-missing.sh &lt;previous-tag&gt;</code> lists every PR merged into
+<code>main</code> since that tag that has neither an entry nor the label. It must print nothing. Step 3
+above then turns <code>## [Unreleased]</code> into the release section, and <code>scripts/release-notes.sh</code>
+makes that section the GitHub Release body.</p>
+<p>Before this process, entries were written at release time from memory. Between 3.0.0 and the
+first PR the check covered, nine PRs merged and none of them added an entry.</p>
 <h2 id="pre-release-verification-checklist">Pre-release verification checklist</h2>
 <p>Before tagging:</p>
 <ul>
@@ -198,7 +223,8 @@ a list of <code>feat:</code> / <code>fix:</code> lines that any reader could com
   outcome noted even if nothing was eligible.</li>
 <li>[ ] <code>VERSION</code> matches the target tag.</li>
 <li>[ ] <code>build/openapi.json</code>'s <code>info.version</code> matches (<code>make openapi-check</code>).</li>
-<li>[ ] <code>CHANGELOG.md</code> has the entry for this version.</li>
+<li>[ ] <code>scripts/changelog-missing.sh &lt;previous-tag&gt;</code> prints nothing, and
+  <code>## [Unreleased]</code> is renamed to this version.</li>
 <li>[ ] Any version number a doc announced ahead of time now matches reality.
   <code>docs/deprecations.md</code> carries a target release in its "Deprecated since"
   column before that release exists, and the roadmap names target versions
@@ -264,8 +290,8 @@ architectural intent is that it should not be.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/release-process.md</code> at tag <code>v3.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/release-process.md">repository</a>, never here.
+      Rendered from <code>docs/release-process.md</code> at tag <code>v3.1.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/release-process.md">repository</a>, never here.
     </p>
   </div>
 </footer>

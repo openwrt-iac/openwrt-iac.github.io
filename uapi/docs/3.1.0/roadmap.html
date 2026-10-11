@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Roadmap - uapi 3.0.0 docs</title>
+<title>Roadmap - uapi 3.1.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.0.0 / Roadmap</p>
+       <a href="/uapi/docs/">docs</a> / 3.1.0 / Roadmap</p>
   </div>
 </header>
 
@@ -140,8 +140,45 @@ spend the major, and still leave the changes unmade.</p>
    (<a href="https://github.com/openwrt-iac/uapi/issues/64">#64</a>). Done. Deferred for a
    while on the grounds that netifd parses the flag differently per section type,
    which is real but does not need an upstream fix: each resource reads it with the
-   helper matching its own parser rather than all three sharing one. See the
-   Features entry.</p>
+   helper matching its own parser rather than all three sharing one.</p>
+<p><strong>The asymmetry was handled rather than waited out.</strong> netifd parses the interface flag with
+   a literal compare against <code>"1"</code> while route and rule go through the boolean
+   blob converter, which also takes <code>true</code> (and only <code>true</code>; <code>on</code> and <code>yes</code> are
+   accepted by neither, and uci drops the option instead). So on 25.12.5
+   <code>option disabled 'true'</code> disables a route or a rule and leaves an interface
+   running, and reading it with one truthy parse would report an interface as
+   disabled while it is up. That is the same lie as the bug being fixed, inverted.</p>
+<p>Upstream closed the asymmetry in netifd <code>e97e36f</code>, 2026-07-16, "config: accept
+   'true' for the interface disabled option", but as of 2026-08-04 no OpenWrt branch
+   pinned it, master included. Waiting turned out to be the wrong call: the parser
+   difference is a fact about the device, so the read follows it per section type.
+   <code>network/interfaces</code> uses <code>strict_bool</code>, the other two use <code>platform_bool</code>, and a
+   unit test pins the difference in both directions, because unifying them puts the lie
+   back whichever way it is unified. When a branch carries <code>e97e36f</code> the interface
+   helper can widen, and that test is what will say so.</p>
+<p>The first cut shared one helper across all three and shipped the inverted lie for a
+   day: an interface carrying <code>disabled 'true'</code> read back as disabled while netifd had
+   it registered and running. Caught by re-reading this entry, and measured three times
+   against a reset baseline before and after.</p>
+<p>Two alternatives were weighed and turned down, recorded so they are not
+   re-argued from scratch:</p>
+<ul>
+<li><strong>Ship routes and rules now, defer interfaces.</strong> They need nothing from
+     upstream, since <code>values.platform_bool</code> is exactly right for both netifd
+     versions there. Rejected because it delivers the harmless two thirds and
+     defers the dangerous one, the interface being where disabling takes the
+     addresses, routes and peers with it; because <code>disabled</code> on two of three
+     sibling resources is an asymmetry no operator can explain from outside; and
+     because the provider would add attributes twice for one issue.</li>
+<li><strong>Ship all three and let <code>runtime</code> carry the disagreement</strong>, the way
+     <code>effective_proto</code> already exposes netifd running something other than what
+     uci asked for. Closer to the house pattern, and tempting. Rejected because
+     the signal is weaker than <code>effective_proto</code>'s: <code>disabled: true</code> with
+     <code>runtime.up: true</code> does prove the disagreement, but <code>disabled: true</code> with
+     <code>runtime.up: false</code> cannot separate disabled-and-honoured from
+     enabled-but-failed, which is the case an operator most needs told apart. If
+     the wait runs long enough to hurt, this is the option to revisit first.</li>
+</ul>
 <ol start="4">
 <li>
 <p><strong>Validation sweep on <code>/diagnostics?validate=1</code></strong> (#47). Done. Reports the
@@ -232,23 +269,35 @@ record; this is the engineering one.</p>
 precondition is reading libvalidate's accepted set out of ubox rather than guessing at it, and
 that has not happened. It could change which strings are accepted on the wire, so acting on a
 guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</code>.</p>
+<h2 id="shipped-in-310">Shipped in 3.1.0</h2>
+<ul>
+<li><strong><code>system/cron_jobs</code></strong>, the first resource over <code>/etc/crontabs/root</code>. It was not on this
+  roadmap: it came from asking whether LuCI's Scheduled Tasks page could be an API surface
+  (<a href="https://github.com/openwrt-iac/uapi/issues/192">#192</a>). Reads follow busybox crond's own
+  parser, including line continuation, and writes refuse what OpenWrt's crond misreads.</li>
+<li><strong><code>dhcp/hosts.match_tag</code></strong>, the roadmap's one ready additive feature. Measured with a real
+  DHCP client before it shipped: it works with tags dnsmasq sets from the request, such as a
+  vendor class, while <code>known</code> and the range's own tag never match, whatever LuCI's help says.</li>
+<li><strong><code>dhcp/hosts</code> stopped passing dnsmasq syntax through <code>name</code> and <code>tag</code></strong>, which allowed a
+  newline in <code>name</code> to add any dnsmasq directive. One check in <code>values.uc</code> now covers every
+  field that lands in the <code>dhcp-host</code> line.</li>
+<li><strong>A full filesystem no longer empties <code>authorized_keys</code> or the crontab.</strong> ucode's <code>close()</code>
+  drops <code>fclose</code>'s error, so a write that ran out of space renamed an empty file over the old
+  one and answered 200. The shared writer now checks the flush.</li>
+<li><strong>Package installs survive a feed rebuild.</strong> <code>apk add</code> refreshes a stale index on its own
+  only after 4 hours, so an install now refreshes and retries once when it fails
+  (<a href="https://github.com/openwrt-iac/uapi/issues/191">#191</a>).</li>
+<li><strong>The changelog is written in each PR and checked by CI</strong>, on the Grafana Mimir model, and a
+  ruleset on <code>main</code> requires that check and the CI jobs.</li>
+</ul>
 <h2 id="features-additive-future-minor-bumps-in-v3x">Features (additive, future minor bumps in v3.x)</h2>
 <ul>
-<li>
-<p><strong><code>dhcp/hosts.match_tag</code>.</strong> Not modelled, though LuCI exposes it on the same
-  form as <code>tag</code> and dnsmasq's host handler reads it with <code>config_list_foreach</code>,
-  so it is a list on both sides with none of the scalar ambiguity <code>tag</code> carries.
-  Found while settling the <code>tag</code> shape. Additive, and it should be declared an
-  array from the start per that decision.</p>
-</li>
-<li>
-<p><strong>Upstream: one unresolvable peer endpoint should not take a tunnel down.</strong>
+<li><strong>Upstream: one unresolvable peer endpoint should not take a tunnel down.</strong>
   Filed as <a href="https://github.com/openwrt/openwrt/issues/24511">openwrt/openwrt#24511</a>.
   <code>wg syncconf</code> is all or nothing and the proto handler escalates any failure to
   <code>proto_setup_failed</code>, so a peer whose endpoint hostname does not resolve stops
   the interface coming up at all, healthy peers included. Measured: <code>up=false</code>,
-  zero peers, no addresses, netifd retrying and giving up.</p>
-</li>
+  zero peers, no addresses, netifd retrying and giving up.</li>
 </ul>
 <p>This is the half that still matters to us. The <code>wg set</code> apply protects the
   <em>write</em>, not the <em>boot</em>: a peer whose endpoint resolves when written and stops
@@ -270,62 +319,16 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   local code would take netifd applying peer deltas synchronously, which is not
   on anyone's roadmap.</p>
 <ul>
-<li><strong><code>disabled</code> on <code>network/interfaces</code>, <code>network/routes</code> and <code>network/rules</code>.</strong>
-  Filed as <a href="https://github.com/openwrt-iac/uapi/issues/64">openwrt-iac/uapi#64</a>.
-  uci carries <code>option disabled</code> on all three section types and netifd honours it
-  (<code>config.c</code> skips a disabled interface, <code>interface-ip.c</code> and <code>iprule.c</code> declare
-  the attribute), but none of the three models it, so an inert section reads back
-  as ordinary active config and a declarative client sees a converged resource
-  set with nothing to apply. It also cannot be cleared through the API, because a
-  <code>PUT</code> cannot unset a field the model does not have. <code>network/wireguard_peers</code>
-  already models it and is the shape to copy. Add it next to <code>auto</code> on
-  <code>network/interfaces</code> rather than in place of it: <code>auto '0'</code> leaves the
-  interface configured but not started at boot, <code>disabled '1'</code> makes netifd
-  ignore the section outright.</li>
-</ul>
-<p><strong>Shipped in 2.5.0, with the asymmetry handled rather than waited out.</strong> netifd parses the interface flag with
-  a literal compare against <code>"1"</code> while route and rule go through the boolean
-  blob converter, which also takes <code>true</code> (and only <code>true</code>; <code>on</code> and <code>yes</code> are
-  accepted by neither, and uci drops the option instead). So on 25.12.5
-  <code>option disabled 'true'</code> disables a route or a rule and leaves an interface
-  running, and reading it with one truthy parse would report an interface as
-  disabled while it is up. That is the same lie as the bug being fixed, inverted.</p>
-<p>Upstream closed the asymmetry in netifd <code>e97e36f</code>, 2026-07-16, "config: accept
-  'true' for the interface disabled option", but as of 2026-08-04 no OpenWrt branch
-  pinned it, master included. Waiting turned out to be the wrong call: the parser
-  difference is a fact about the device, so the read follows it per section type.
-  <code>network/interfaces</code> uses <code>strict_bool</code>, the other two use <code>platform_bool</code>, and a
-  unit test pins the difference in both directions, because unifying them puts the lie
-  back whichever way it is unified. When a branch carries <code>e97e36f</code> the interface
-  helper can widen, and that test is what will say so.</p>
-<p>The first cut shared one helper across all three and shipped the inverted lie for a
-  day: an interface carrying <code>disabled 'true'</code> read back as disabled while netifd had
-  it registered and running. Caught by re-reading this entry, and measured three times
-  against a reset baseline before and after.</p>
-<p>Two alternatives were weighed and turned down, recorded so they are not
-  re-argued from scratch:</p>
-<ul>
-<li><strong>Ship routes and rules now, defer interfaces.</strong> They need nothing from
-    upstream, since <code>values.platform_bool</code> is exactly right for both netifd
-    versions there. Rejected because it delivers the harmless two thirds and
-    defers the dangerous one, the interface being where disabling takes the
-    addresses, routes and peers with it; because <code>disabled</code> on two of three
-    sibling resources is an asymmetry no operator can explain from outside; and
-    because the provider would add attributes twice for one issue.</li>
-<li><strong>Ship all three and let <code>runtime</code> carry the disagreement</strong>, the way
-    <code>effective_proto</code> already exposes netifd running something other than what
-    uci asked for. Closer to the house pattern, and tempting. Rejected because
-    the signal is weaker than <code>effective_proto</code>'s: <code>disabled: true</code> with
-    <code>runtime.up: true</code> does prove the disagreement, but <code>disabled: true</code> with
-    <code>runtime.up: false</code> cannot separate disabled-and-honoured from
-    enabled-but-failed, which is the case an operator most needs told apart. If
-    the wait runs long enough to hurt, this is the option to revisit first.</li>
-</ul>
-<p>Additive, so a minor bump. <code>terraform-provider-uapi</code> needs matching attributes
-  on <code>uapi_network_interface</code>, <code>uapi_network_route</code> and <code>uapi_network_rule</code> once
-  the fields exist.</p>
-<ul>
-<li><strong>Standalone confirm arm over HTTP (<code>POST /confirm</code>).</strong> The per-write
+<li>
+<p><strong>Upstream: widen the interface <code>disabled</code> reader once 25.12 carries netifd <code>e97e36f</code>.</strong>
+  netifd accepts <code>disabled 'true'</code> on an interface since that commit, 2026-07-16, so
+  <code>network/interfaces</code> can then read the flag with <code>platform_bool</code> like routes and rules.
+  As of 2026-10-10, OpenWrt <code>main</code> pins a netifd from 2026-09-11, which carries it, but
+  <code>openwrt-25.12</code> still pins 2026-02-26, and so does 25.12.5. The unit test that pins the
+  per-type difference is what will say when the widening is right.</p>
+</li>
+<li>
+<p><strong>Standalone confirm arm over HTTP (<code>POST /confirm</code>).</strong> The per-write
   <code>?confirm</code> never shipped (built in 2.3.0-rc1, removed before stable) and
   should not: a DAG apply is N isolated provider RPCs with no apply-level
   begin/end hook, and only one window can exist at a time, so a second
@@ -364,7 +367,8 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   recorded the resources that succeeded, so acking keeps the box consistent
   with state); only an unreachable box should be left to auto-revert (<code>apply;
   if reachable then ack else let-expire</code>, never <code>if exit 0 then ack</code>). Origin:
-  terraform-provider-uapi integration feedback.</li>
+  terraform-provider-uapi integration feedback.</p>
+</li>
 <li><strong>Webhooks / change notifications.</strong> Push notification to a configured
   URL after a successful write. Needs reliable retry + dead-letter queue;
   likely needs a sidecar. Defer until there's a concrete subscriber.</li>
@@ -382,21 +386,6 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   surface. Current gap candidates worth opportunistic curation:
   <code>mwan3/*</code>, <code>usteer/*</code> (passive band-steering daemon for OpenWrt 22+
   multi-AP setups), <code>openvpn/*</code> (the daemon is supported by uci natively).</li>
-<li><strong><code>unbound/server</code> listen-address / interface binding.</strong> Field
-  feedback (v2.0.0 migration) flagged the inability to bind unbound to
-  a specific address (loopback-only recursive backend behind dnsmasq,
-  <code>127.0.0.1@5353</code>). Blocked upstream: OpenWrt's
-  <code>/usr/lib/unbound/unbound.sh:386</code> carries an explicit <code># TODO: add
-  UCI list for interfaces to bind</code>. The only knobs the init script
-  reads today are <code>listen_port</code>, <code>interface_auto</code>, and the per-trigger
-  <code>interface</code> (used for reload gating, not bind), so there is no uci
-  surface to curate. Path forward: open a PR against the OpenWrt
-  unbound package adding <code>list interface_bind '...'</code> (and likely
-  <code>list interface_outgoing '...'</code>), then curate the new options here
-  once a release ships them. Floor option if upstream rejects or
-  takes too long: a non-uci <code>unbound/extra_server_conf</code> resource
-  writing <code>/etc/unbound/unbound_srv.conf</code> (high bar per
-  <code>docs/non-uci-state.md</code>; only if option (a) genuinely stalls).</li>
 </ul>
 <h2 id="install-the-deferred-packages-in-ci">Install the deferred packages in CI</h2>
 <p>Partly done in 2.5.0. lldpd and vnstat2 are installed by <code>install_uapi</code>'s bootstrap, about
@@ -431,7 +420,7 @@ is unresolvable.</p>
   which nobody has gathered. Until then the tree says measurement, not gate.</p>
 </li>
 <li>
-<p><strong>Finish the lock-state audit.</strong> <code>docs/lock-state-audit.md</code> covers 17 of the 36
+<p><strong>Finish the lock-state audit.</strong> <code>docs/lock-state-audit.md</code> covers 16 of the 36
   sites its own reproduction command finds, and roughly seven of its line ranges have
   drifted. Nine modules are absent entirely: <code>error_ring</code>, <code>idempotency</code>, <code>metrics</code>,
   <code>mgmt</code>, <code>ratelimit</code>, <code>token_store</code>, <code>dhcp.leases</code>, <code>dhcp.leases6</code>, <code>dhcp.servers</code>. The
@@ -491,8 +480,8 @@ stale enough to be misleading:</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/roadmap.md">repository</a>, never here.
+      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.1.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/roadmap.md">repository</a>, never here.
     </p>
   </div>
 </footer>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Errors - uapi 3.0.0 docs</title>
+<title>Errors - uapi 3.1.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.0.0 / Errors</p>
+       <a href="/uapi/docs/">docs</a> / 3.1.0 / Errors</p>
   </div>
 </header>
 
@@ -354,8 +354,10 @@ resource that was never actually checked is the one answer that endpoint must no
 <p>The four transaction-header rows above (<code>X-Reload-Status</code>, <code>X-Reload-Services</code>,
 <code>X-Kernel-Status</code>, <code>X-Kernel-Applied</code>) say "curated-resource writes" rather than "writes" because that is
 measured, not assumed: raw passthrough (<code>/raw/...</code>) and the non-uci writes
-(<code>/packages/...</code>, <code>/tokens</code>, <code>/system/password</code>, <code>/system/authorized_keys</code>) never reach
-<code>attach_reload_headers</code> and return none of them. Until 2.5.0 the OpenAPI document declared
+(<code>/packages/...</code>, <code>/tokens</code>, <code>/system/password</code>, <code>/system/authorized_keys</code>,
+<code>/system/cron_jobs</code>) never reach <code>attach_reload_headers</code> and return none of them.
+<code>/system/cron_jobs</code> does reload cron, but reports the outcome in its body as
+<code>runtime.crond_running</code>, because the init script exits 0 even when crond stops. Until 2.5.0 the OpenAPI document declared
 the reload pair on those responses anyway, which is why the wording here matters: a client
 generated from the spec was told to expect a header that was never going to arrive.
 <code>POST /batch</code> does not reach <code>attach_reload_headers</code> either, but since 3.0.0 its 207
@@ -385,8 +387,8 @@ possibly restore) and is typically well under a second.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/errors.md</code> at tag <code>v3.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/errors.md">repository</a>, never here.
+      Rendered from <code>docs/errors.md</code> at tag <code>v3.1.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/errors.md">repository</a>, never here.
     </p>
   </div>
 </footer>

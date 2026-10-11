@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Curated resources - uapi 3.0.0 docs</title>
+<title>Curated resources - uapi 3.1.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.0.0 / Curated resources</p>
+       <a href="/uapi/docs/">docs</a> / 3.1.0 / Curated resources</p>
   </div>
 </header>
 
@@ -196,7 +196,7 @@ daemon's runtime convergence.</p>
 <tr>
 <td><code>dhcp/hosts</code></td>
 <td><code>config host</code></td>
-<td>Static leases. <code>macs</code> (the whole uci <code>list mac</code>), <code>ip</code>, <code>name</code>, <code>leasetime</code>, <code>duid</code>, <code>tag</code>.</td>
+<td>Static leases. <code>macs</code> (the whole uci <code>list mac</code>), <code>ip</code>, <code>name</code>, <code>leasetime</code>, <code>duid</code>, <code>tag</code> (tags the host sets), <code>match_tag</code> (tags a request must carry).</td>
 </tr>
 <tr>
 <td><code>dhcp/servers</code></td>
@@ -255,6 +255,11 @@ daemon's runtime convergence.</p>
 <td><code>system/authorized_keys</code></td>
 <td><code>/etc/dropbear/authorized_keys</code> (non-uci)</td>
 <td><code>GET</code>/<code>POST</code>/<code>PUT</code>/<code>DELETE</code> for SSH key entries. Server-side key-type validation.</td>
+</tr>
+<tr>
+<td><code>system/cron_jobs</code></td>
+<td><code>/etc/crontabs/root</code> (non-uci)</td>
+<td><code>GET</code>/<code>POST</code>/<code>DELETE</code> for one crontab line each. Lines from packages stay as they are. <code>runtime.crond_running</code> reports whether crond runs, and <code>runtime.runs_as_written</code> flags a line crond misreads.</td>
 </tr>
 </tbody>
 </table>
@@ -478,8 +483,8 @@ composition rules, and stability caveat.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/resources.md</code> at tag <code>v3.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.0.0/docs/resources.md">repository</a>, never here.
+      Rendered from <code>docs/resources.md</code> at tag <code>v3.1.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/resources.md">repository</a>, never here.
     </p>
   </div>
 </footer>
