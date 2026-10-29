@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Roadmap - uapi 3.1.0 docs</title>
+<title>Roadmap - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Roadmap</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Roadmap</p>
   </div>
 </header>
 
@@ -283,12 +283,76 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   field that lands in the <code>dhcp-host</code> line.</li>
 <li><strong>A full filesystem no longer empties <code>authorized_keys</code> or the crontab.</strong> ucode's <code>close()</code>
   drops <code>fclose</code>'s error, so a write that ran out of space renamed an empty file over the old
-  one and answered 200. The shared writer now checks the flush.</li>
+  one and answered 200. The shared writer now checks that the file holds every byte that it
+  wrote.</li>
 <li><strong>Package installs survive a feed rebuild.</strong> <code>apk add</code> refreshes a stale index on its own
   only after 4 hours, so an install now refreshes and retries once when it fails
   (<a href="https://github.com/openwrt-iac/uapi/issues/191">#191</a>).</li>
 <li><strong>The changelog is written in each PR and checked by CI</strong>, on the Grafana Mimir model, and a
   ruleset on <code>main</code> requires that check and the CI jobs.</li>
+</ul>
+<h2 id="shipped-in-320">Shipped in 3.2.0</h2>
+<ul>
+<li><strong>Reads follow what netifd and the scripts read.</strong> <code>network/interfaces</code>, <code>routes</code>, <code>rules</code>,
+  <code>devices</code>, <code>bridge_vlans</code> and <code>wireguard_peers</code> read a hex or octal integer, a scalar list as
+  its words, a table name as its id and a service name as its port, as netifd, <code>wireguard.sh</code>
+  and wg do. Before, a PUT of a read could remove the ports of a bridge, move a route into the
+  main table or change the port of a tunnel.</li>
+<li><strong><code>network/interfaces</code> knows which proto takes which field.</strong> A write refuses a field that the
+  proto does not take, a read omits it, and a PATCH that changes <code>proto</code> removes the options of
+  the old one. The options that netifd reads on every proto, such as <code>metric</code>, <code>ip4table</code>,
+  <code>ip6hint</code> and <code>ip6ifaceid</code>, apply to every proto, and <code>sourcefilter</code>, <code>ip6class</code>, <code>ip6weight</code>
+  and <code>broadcast_flag</code> are new.</li>
+<li><strong>A write that the daemon refuses or ignores no longer answers 200.</strong> An <code>mtu</code> that netifd or
+  pppd does not apply, table 0, a <code>goto</code> that the kernel refuses and a raw option that uci
+  cannot store answer 422, and a package with no file under <code>/etc/config/</code> answers
+  <code>503 config_missing</code>. A commit that libuci refuses answers an error, and a <code>POST /batch</code> then
+  restores what it committed and runs no reload and no kernel apply (#277). A <code>dhcp_option</code>
+  entry in which an address is followed by whitespace and a second option answers 422, and a
+  write whose generated config <code>dnsmasq --test</code> refuses answers <code>500 reload_failed_restored</code>
+  and restores the previous config (#279). The request schemas declare the bounds that a write
+  accepts, through <code>x-uapi-write</code>. A write to <code>dhcp/servers</code>, <code>dhcp/hosts</code> or the raw <code>dhcp</code>
+  package reloads odhcpd too, and one to <code>dhcp/odhcpd</code> reloads dnsmasq too, while procd runs
+  that daemon, so neither daemon keeps its old config after a write that answered 200 (#280).</li>
+<li><strong>A PUT of the read of a radio or an SSID keeps its hardware binding and its 802.11r group.</strong>
+  Before, the first apply that changed a radio removed its <code>path</code>, and the radio stayed down
+  with all its SSIDs.</li>
+<li><strong>Raw writes answer with what uci stored</strong>, refuse what uci cannot store, and remove an option
+  for <code>null</code> and <code>""</code>. Every write reads the package only after it takes the lock, so a commit
+  by LuCI just before it is no longer invisible to it.</li>
+<li><strong>Audits of the values that reach a root shell or a daemon config.</strong> A WireGuard peer's
+  <code>allowed_ips</code> and a stored <code>persistent_keepalive</code> reached a root shell, <code>endpoint_host</code> and a
+  wireless <code>key</code> added lines to a daemon config, a raw <code>.type</code> passed the scope check as another
+  type, and an IPv6 <code>allowed_cidrs</code> entry could admit every address. Each one is fixed. The
+  values that init scripts copy into the configs and commands of snmpd, dnsmasq, unbound, lldpd,
+  mwan3, netifd and wifi-scripts refuse the characters that end a line or an argument, and
+  <code>docs/security.md</code> lists the write scopes that reach root.</li>
+<li><strong>Values that a daemon refuses or misreads answer 422.</strong> A wireless <code>ssid</code> over 32 bytes, a
+  <code>key</code> in a form that hostapd or wpa_supplicant refuses, mode <code>wds</code>, a dnsmasq value with a
+  double quote, an lldpcli value with a backslash and an snmpd access without a <code>context</code> no
+  longer answer 200 while the daemon fails. A WireGuard peer reads its keys, prefixes, host,
+  keepalive and list options as wg, netifd and wireguard.sh do, so the apply, the restore and
+  the route withdraw act on the peer that the kernel holds. The response schemas of the curated
+  resources declare no <code>pattern</code>. The items of
+  <a href="https://github.com/openwrt-iac/uapi/issues/249">#249</a> that 3.2.0 does not fix stay open
+  there, and the newline rule moves to <a href="https://github.com/openwrt-iac/uapi/issues/276">#276</a>.</li>
+<li><strong>A write that makes a daemon read stored values checks them.</strong> Turning a radio on, giving it
+  a type, moving an SSID onto an enabled radio, switching an interface to wireguard and enabling
+  a wireguard interface check the stored values of its SSIDs or peers that the daemon would
+  refuse, and a write after which unbound stops answers an error instead of 200 (#259 to #262,
+  #272). The restore of the peers of an interface no longer stops at a peer without a key or
+  without allowed IPs (#272).</li>
+<li><strong>A merge PATCH has its own schema.</strong> Each <code>&lt;Name&gt;Patch</code> has the properties of <code>&lt;Name&gt;Request</code>
+  without <code>required</code>, conditionals or defaults, and takes null where the server removes the
+  field, so a strict client sends what the server takes (#258, #263).</li>
+<li><strong>A write answers what uci then holds.</strong> The body and the ETag of a write come from the
+  section that it staged, and a PATCH that changes nothing writes nothing, keeps the comments of
+  the package (#272, #275), and runs no reload and no kernel apply (#277). An option that a
+  daemon splits into words, such as an lldpd <code>interface</code> or a dnsmasq <code>dhcp_option</code> or <code>mac</code>,
+  reads as its words (#274), and <code>wireless/devices</code> reads its numbers as netifd does (#257).</li>
+<li><strong>The state that uapi keeps in tmpfs is private.</strong> The idempotency cache, the metrics, the
+  rate-limit buckets, the error ring and the last-used markers of the tokens keep their files
+  under <code>/var/run</code>, in directories of mode 0700 with files of mode 0600 (#266, #270).</li>
 </ul>
 <h2 id="features-additive-future-minor-bumps-in-v3x">Features (additive, future minor bumps in v3.x)</h2>
 <ul>
@@ -323,8 +387,8 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
 <p><strong>Upstream: widen the interface <code>disabled</code> reader once 25.12 carries netifd <code>e97e36f</code>.</strong>
   netifd accepts <code>disabled 'true'</code> on an interface since that commit, 2026-07-16, so
   <code>network/interfaces</code> can then read the flag with <code>platform_bool</code> like routes and rules.
-  As of 2026-10-10, OpenWrt <code>main</code> pins a netifd from 2026-09-11, which carries it, but
-  <code>openwrt-25.12</code> still pins 2026-02-26, and so does 25.12.5. The unit test that pins the
+  As of 2026-10-28, OpenWrt <code>main</code> pins a netifd from 2026-10-28, which carries it, but
+  <code>openwrt-25.12</code> still pins 2026-02-26, and so does 25.12.6. The unit test that pins the
   per-type difference is what will say when the widening is right.</p>
 </li>
 <li>
@@ -351,9 +415,9 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   apply it guards (wrapping a <code>network:routes</code>-only apply needs <code>:rw</code> on all
   6 <code>network</code>-backed resources, since the revert can restore any of them), so
   the guide must say "mint the wrap token at package granularity" or a narrow
-  token gets a confusing 403 on arm. New endpoint, so a minor bump (2.4.0+),
-  not a 2.3.x patch. Defer the merge
-  until <code>apply-confirm</code> is feed-stable and a concrete consumer asks: the
+  token gets a confusing 403 on arm. New endpoint, so a minor bump, not a
+  patch. Defer the merge until <code>apply-confirm</code> is feed-stable and a
+  concrete consumer asks: the
   provider stays Option A (write path untouched) and the wrap is operator-
   driven. Two residual hazards want a reference wrapper-with-ack/rollback-trap,
   owned by the provider repo (the concrete consumer), not prose alone: the
@@ -376,16 +440,14 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   streaming or change feeds. Fundamentally incompatible with the
   fork-per-request model. Punt.</li>
 <li><strong>Per-field RBAC.</strong> Granular write permissions like "can edit MTU but not
-  IP on <code>network/interfaces</code>". Scope-level is enough for v2; this is
+  IP on <code>network/interfaces</code>". Scope-level is enough today, and this is
   enterprise creep. Don't add until requested by a real deployment.</li>
 <li><strong>Content-Type negotiation (YAML, msgpack).</strong> Single-content-type
   (<code>application/json</code>) is correct for IaC. Defer indefinitely.</li>
 <li><strong>CORS.</strong> Admin UI is LuCI; no browser-direct use case for uapi.</li>
 <li><strong>More resources.</strong> Curation completeness rule in <code>docs/adding-a-resource.md</code>: add when a
   typical real configuration sets options the curated layer doesn't
-  surface. Current gap candidates worth opportunistic curation:
-  <code>mwan3/*</code>, <code>usteer/*</code> (passive band-steering daemon for OpenWrt 22+
-  multi-AP setups), <code>openvpn/*</code> (the daemon is supported by uci natively).</li>
+  surface.</li>
 </ul>
 <h2 id="install-the-deferred-packages-in-ci">Install the deferred packages in CI</h2>
 <p>Partly done in 2.5.0. lldpd and vnstat2 are installed by <code>install_uapi</code>'s bootstrap, about
@@ -420,14 +482,33 @@ is unresolvable.</p>
   which nobody has gathered. Until then the tree says measurement, not gate.</p>
 </li>
 <li>
-<p><strong>Finish the lock-state audit.</strong> <code>docs/lock-state-audit.md</code> covers 16 of the 36
-  sites its own reproduction command finds, and roughly seven of its line ranges have
-  drifted. Nine modules are absent entirely: <code>error_ring</code>, <code>idempotency</code>, <code>metrics</code>,
-  <code>mgmt</code>, <code>ratelimit</code>, <code>token_store</code>, <code>dhcp.leases</code>, <code>dhcp.leases6</code>, <code>dhcp.servers</code>. The
-  doc no longer claims completeness, so this is a coverage gap rather than a false
-  statement, but the missing sites are real fd and lock acquisitions with no release
-  proof written down. Re-run the command, audit each site, and consider whether the count
-  can be checked mechanically the way the read-honesty case list is.</p>
+<p><strong>A request that uhttpd kills after its commit leaves the write half done.</strong> uhttpd
+  sends <code>SIGKILL</code> to the request process, and to no other, when the client closes the
+  connection before the response and when <code>script_timeout</code> runs out (60 s unless set). A
+  Terraform interrupt or a client-side timeout does the first. No ucode code runs after a
+  <code>SIGKILL</code>. <code>transaction()</code> commits, then reloads, runs the stay-up watch and the kernel
+  apply, and after a failure restores the snapshot and reloads again, all in that process.
+  A kill after the commit leaves uci with the new config, runs no check and no restore, and
+  answers nothing. The reload that the request started runs on, and since the lock fds
+  close on exec the kill also releases the lock, so the next write can commit and reload
+  beside it. <code>multi_transaction()</code> and the crontab apply in <code>crontab.uc</code> have the same
+  shape. The steps after the commit are not short: each reload, the stay-up watch, which
+  waits up to 2 s and again on a restore, and the kernel apply.
+  Nothing inside the request can close this, so it needs a design change. The shapes seen
+  so far, none chosen:</p>
+</li>
+<li>A record of the write in flight, written before the commit and removed when the
+    recipe ends, which the next request that takes the lock of the package finds. It could
+    report the interrupted write, which adds wire surface, or finish it, which needs a
+    decision on whether one request may restore a write that is not its own.</li>
+<li>The steps after the commit in a process that uhttpd does not kill. That is work that
+    outlives the request, which <code>docs/concurrency.md</code> rules out, and the client still gets
+    no answer.</li>
+<li>
+<p>A change to uhttpd to send <code>SIGTERM</code> and wait before <code>SIGKILL</code>, so that a request can
+    ignore it with ucode's <code>signal()</code> until its recipe ends. That is upstream work, and the
+    wait would bound how long a recipe may take.
+  The details are under Open findings in <code>docs/lock-state-audit.md</code>.</p>
 </li>
 <li>
 <p><strong>Reporting-surface consumption is the provider's.</strong> <code>X-Kernel-Status</code>,
@@ -435,19 +516,6 @@ is unresolvable.</p>
   <code>terraform-provider-uapi</code> consumes none of them. That is the provider's call, not a gap
   in this repo, and it is recorded here only so the question is not re-opened as uapi
   work.</p>
-</li>
-<li>
-<p><strong>Derive the property-fuzz resource list from the resource registry.</strong>
-  <code>tests/unit/read_honesty_test.uc</code> now does exactly this and is the pattern to
-  copy: it walks <code>src/resources/</code> and fails naming any module with a <code>validate()</code>
-  that has no case, so the list cannot fall behind the tree.
-  <code>tests/unit/property_test.uc</code> keeps <code>RESOURCES</code> as a hand-written literal, so a
-  new curated resource gets no fuzz coverage until somebody remembers to add it.
-  That is how <code>unbound.srv</code> and <code>unbound.ext</code> went unfuzzed: both are writable and
-  both have a <code>validate()</code>, and neither was in the list. They are in it now, but
-  the next resource can slip the same way. The read-only collections
-  (<code>dhcp.leases</code>, <code>dhcp.leases6</code>) have no <code>validate()</code> and are correctly excluded,
-  so a derived list needs that one filter.</p>
 </li>
 </ul>
 <p>Everything else this section used to list has shipped, and the section had gone
@@ -462,6 +530,85 @@ stale enough to be misleading:</p>
 <li>CI already runs the property pass at a fixed 1000 iterations per resource
   (<code>PROPERTY_ITERS=1000 make test-property</code>), which was the iteration gate this
   section asked for.</li>
+<li>The property-fuzz pass derives its resource list from <code>src/resources/</code> since
+  3.2.0 (<code>tests/unit/property_test.uc</code>). It skips the read-only collections
+  (<code>dhcp.leases</code>, <code>dhcp.leases6</code>), which have no <code>validate()</code>, and fails naming
+  any other module without one. The hand-written list it replaced had left
+  <code>unbound.srv</code> and <code>unbound.ext</code> unfuzzed. <code>tests/unit/read_honesty_test.uc</code>
+  walks the same directory, but only to check that its hand-written cases cover
+  every writable module.</li>
+<li>The lock-state audit is complete. It covered 16 of the 36 sites its command found,
+  and that command missed every ubus connection, every uci cursor and the lock
+  acquisitions of <code>multi_transaction()</code>. <code>docs/lock-state-audit.md</code> now has a release
+  proof for each site the wider command finds, and <code>make lint-lock-audit</code> fails when a
+  site is missing from its table or a range no longer holds one. The defects the audit
+  found that are not fixed yet are recorded there under Open findings. The unchecked
+  writes of a preshared key file and of a feed file, the shared temp file of the error
+  ring, the rename checks of the error ring and the metrics, which never ran, and a
+  revoke that dropped its rate-limit bucket before the commit are fixed (#267). The
+  restore replaces the package with a rename, and the uci cursor no longer reads or
+  commits what a shell staged (#268). The lock files close on exec, so a request that
+  uhttpd kills no longer leaves its lock to the children it started, a mint or a revoke
+  reaps the files in tmpfs of the tokens that no longer authenticate, a path that no
+  route serves adds no metric files, and <code>uapi-token</code> takes the uapi lock (#269).
+  Two idempotency stores of one key no longer share a temp file (#270).</li>
+</ul>
+<h2 id="objectives-for-the-next-major">Objectives for the next major</h2>
+<ul>
+<li>
+<p><strong>Routes <code>table</code> and rules <code>lookup</code> accept table names on write.</strong> netifd resolves both
+  through <code>/etc/iproute2/rt_tables</code>, and LuCI writes the name. Since 3.2.0 a read resolves a
+  stored name to its id, so the integer type stays and a PUT of the read writes the id. Taking
+  a name on write needs the type to become a string or a union, which is breaking under
+  <code>docs/versioning.md</code> (<a href="https://github.com/openwrt-iac/uapi/issues/240">#240</a>).</p>
+</li>
+<li>
+<p><strong><code>network/interfaces.ip6prefix</code> stops taking a string on write.</strong> Since 3.2.0 a read is
+  always an array, and a write still takes the space-separated string that the 3.1 spec
+  declared (<a href="https://github.com/openwrt-iac/uapi/issues/241">#241</a>). The removal deletes, in one
+  go: <code>"string"</code> in the type, the <code>x-uapi-write-string</code> marker and its branch in
+  <code>build/gen_openapi.uc</code> (the check in <code>tests/lint_openapi_shape.uc</code> that no source marker
+  reaches the spec stays), the string path in <code>toUci</code> and <code>validate()</code>, the sentence in the
+  field description, the row in <code>docs/deprecations.md</code> and the <code>ip6prefix</code> example in
+  <code>docs/versioning.md</code>, and it adds a row to the v3-to-v4 migration document.</p>
+</li>
+<li>
+<p><strong>One rule for newlines in curated strings.</strong> 3.2.0 refuses a newline field by field, after an
+  audit of the daemon that reads each field, and each new field that a daemon reads as one line
+  needs the same audit. About a third of the writable string fields still take a newline or a
+  carriage return, and only <code>system.notes</code> holds several lines on purpose. A default refusal of
+  both in <code>check_schema_types</code>, with an opt-out annotation for <code>system.notes</code>, ends the audits.
+  It is breaking for the free-text fields, such as descriptions, where no daemon gives the
+  evidence that the tightening carve-out needs
+  (<a href="https://github.com/openwrt-iac/uapi/issues/276">#276</a>).</p>
+</li>
+<li>
+<p><strong><code>mwan3/interfaces.family</code> is required, or an unset one reads as <code>ipv4</code>.</strong> mwan3 reads an
+  unset family as ipv4 (<code>mwan3.sh</code> and <code>mwan3track</code> both default it), and a read gives null. The
+  spec requires the key and takes null, and <code>validate()</code> does not require a value. So on the
+  stock <code>wan6</code>, which sets <code>family 'ipv6'</code>, <code>PATCH {"family": null}</code> answers 200, and mwan3 then
+  handles wan6 as IPv4 while the read says null. Since 3.2.0 the field description says that a
+  null removes the option and that mwan3 then uses ipv4. Refusing the null tightens what a write
+  takes, and reading <code>ipv4</code> changes what a read of an unset family gives, so either waits for
+  the major.</p>
+</li>
+<li>
+<p><strong>A <code>wireless/interfaces</code> section with no <code>mode</code> reads as null instead of <code>ap</code>.</strong> wifi-scripts
+  sets up nothing for such a section, because its switch on the mode skips an absent mode as it
+  skips any mode that it does not know (<code>mac80211.sh:260</code>). uapi reads the section as <code>ap</code>, so a
+  read reports an access point that does not exist. The read change is breaking, because the
+  Response then takes null and every such section reads differently.</p>
+</li>
+<li>
+<p><strong>Whether to check every field at each save, as LuCI does.</strong> LuCI validates each visible field
+  of a form when it saves, so a stored value that breaks a rule blocks every save of the section
+  until it is fixed. For the rules in <code>validate_new()</code>, uapi refuses a write only for an error
+  that the write adds (<code>new_errors()</code> in <code>src/lib/handler.uc</code>): one in a field that it changes,
+  one that the section did not have, or a dormant one that it makes live. So a write that leaves
+  a stored value alone passes, even one that only disables the section, and
+  <code>GET /api/v3/diagnostics?validate=1</code> lists the value. LuCI's model refuses writes that 3.1.0
+  accepts, so adopting it is breaking.</p>
+</li>
 </ul>
 <h2 id="out-of-scope-by-design">Out of scope by design</h2>
 <ul>
@@ -480,8 +627,8 @@ stale enough to be misleading:</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/roadmap.md">repository</a>, never here.
+      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/roadmap.md">repository</a>, never here.
     </p>
   </div>
 </footer>

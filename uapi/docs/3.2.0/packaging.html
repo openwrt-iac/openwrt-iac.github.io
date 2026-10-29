@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Building the uapi APK - uapi 3.1.0 docs</title>
+<title>Building the uapi APK - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Building the uapi APK</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Building the uapi APK</p>
   </div>
 </header>
 
@@ -26,7 +26,7 @@
 <p><strong>Wires only to the <code>main</code> uhttpd instance.</strong> Operators running multiple uhttpd instances who want the API on another instance configure it manually (the post-install message points at this).</p>
 <p><strong>No conflicts.</strong> Coexists with rpcd, LuCI, and anything else hosted on uhttpd.</p>
 <p><strong>No default token shipped.</strong> Operators mint the first token via <code>uapi-token create</code> after install. Shipping a default would be a security hole.</p>
-<p><strong>Distribution.</strong> v1 launch ships on the project-owned OpenWrt feed at <code>openwrt-iac.github.io/feed/</code>. Submission to the official <code>packages</code> feed is a later step, not a blocker.</p>
+<p><strong>Distribution.</strong> v1 launch ships on the project-owned OpenWrt feed at <code>openwrt-iac.github.io/feed/</code>. Submission to the official <code>packages</code> feed is open as openwrt/packages#30752, and is not a blocker.</p>
 <h2 id="what-gets-installed">What gets installed</h2>
 <pre><code>/usr/share/uapi/main.uc                  uhttpd ucode-prefix entry point
 /usr/share/uapi/raw.uc                   generic /raw/&lt;package&gt;/&lt;id&gt; handler
@@ -34,19 +34,21 @@
 /usr/share/uapi/lib/*.uc                 every module in src/lib (the install globs
                                           the directory, so this needs no list here)
 /usr/share/uapi/resources/*.uc           curated resource modules
-/usr/share/uapi/openapi.json             generated OpenAPI 3.1 spec
+/usr/share/uapi/openapi.json             generated OpenAPI 3.1 spec, without whitespace
 /usr/bin/uapi-token                      token CLI
 /etc/config/uapi                         conffile (mode 0600, conffile-marked)
 /etc/uci-defaults/99-uapi                one-shot install hook
 </code></pre>
 <p>Runtime files created on first use (tmpfs, reset on reboot):</p>
-<pre><code>/tmp/uapi-ratelimit/&lt;token&gt;.txt          per-token bucket state
-/tmp/uapi-idempotency/&lt;sha&gt;.json         per-key cached POST responses (24h TTL)
-/tmp/uapi-metrics/&lt;series&gt;/&lt;labels&gt;.txt  Prometheus counter/histogram store
-/var/run/uapi-token-update/&lt;token&gt;       last-used throttle sentinel
-/var/lock/uapi.lock                      global flock (SH for uci tx, EX for non-uci)
-/var/lock/uapi.pkg.&lt;package&gt;.lock        per-package EX flock
+<pre><code>/var/run/uapi-ratelimit/&lt;token&gt;.txt          per-token bucket state
+/var/run/uapi-idempotency/&lt;sha&gt;.json         per-key cached POST responses (24h TTL)
+/var/run/uapi-metrics/&lt;series&gt;/&lt;labels&gt;.txt  Prometheus counter/histogram store
+/var/run/uapi-error-ring/ring.json           the last 20 errors, for /diagnostics
+/var/run/uapi-token-update/&lt;token&gt;           last-used throttle sentinel
+/var/lock/uapi.lock                          global flock (SH for uci tx, EX for non-uci)
+/var/lock/uapi.pkg.&lt;package&gt;.lock            per-package EX flock
 </code></pre>
+<p>The <code>/var/run/uapi-*</code> directories have mode 0700 and their files 0600, see <code>docs/architecture.md</code> § Where state lives.</p>
 <p><code>/etc/config/uapi</code> is marked as a conffile, so upgrades preserve
 operator-created tokens.</p>
 <p>Dependencies (pulled in automatically):</p>
@@ -65,6 +67,7 @@ curl -L &quot;$SDK_URL&quot; | tar --use-compress-program=unzstd -xvf - -C build
 <pre><code class="language-sh">make openapi   # regenerate build/openapi.json
 make stage     # populate build/openwrt/uapi/files/
 </code></pre>
+<p><code>make stage</code> needs <code>python3</code>, which the OpenWrt SDK requires on the host too. <code>tools/compact_json.py</code> writes the spec into the APK without whitespace, and the stage fails unless that copy parses to the same JSON value as <code>build/openapi.json</code>, with the keys in the same order. <code>main.uc</code> reads the file whole into every request process that serves <code>GET /api/v3/openapi.json</code>, and uhttpd does not compress it. The compact copy is about 30% smaller. <code>build/openapi.json</code> stays indented in the repository, because reviews read its diffs. The uapi package of the OpenWrt packages feed builds from the release tarball and copies <code>build/openapi.json</code> as it is, so it installs the indented file until its Makefile runs <code>tools/compact_json.py</code>.</p>
 <h3 id="3-build-inside-the-sdk">3. Build inside the SDK</h3>
 <pre><code class="language-sh">cd build/sdk
 ./scripts/feeds update -a
@@ -89,10 +92,12 @@ ssh root@&lt;router&gt; 'uapi-token create --name first --scope &quot;*:rw&quot;
 <ol>
 <li>Strips any older mount (<code>/api/v2=</code>, <code>/api/v1=</code>) from <code>uhttpd.main.ucode_prefix</code>, so an upgraded box does not serve the same <code>main.uc</code> under a prefix whose surface no longer exists.</li>
 <li>Adds <code>/api/v3=/usr/share/uapi/main.uc</code> unless it is already listed.</li>
-<li>Commits the uhttpd config and reloads uhttpd, but only if either step changed something.</li>
+<li>If either step changed something, commits the uhttpd config and, if uhttpd is enabled, reloads it.</li>
 </ol>
-<p><code>postinst</code> then restarts uhttpd unconditionally, because uhttpd-mod-ucode caches the compiled VM at parent startup and a reload would keep serving the previous version's code.</p>
-<p>After that, <code>https://&lt;router&gt;/api/v3/healthz</code> is reachable.</p>
+<p><code>postinst</code> then restarts uhttpd, because uhttpd-mod-ucode caches the compiled VM at parent startup and a reload would keep serving the previous version's code.</p>
+<p>Both steps leave a disabled uhttpd stopped. On OpenWrt, <code>reload</code> and <code>restart</code> both start a stopped service, and an operator can disable uhttpd on purpose, for example because another web server uses its ports. That operator starts uhttpd when they want the API.</p>
+<p>After the restart, <code>postinst</code> removes <code>/var/run/uapi-idempotency</code>, <code>/var/run/uapi-metrics</code>, <code>/var/run/uapi-ratelimit</code>, <code>/var/run/uapi-error-ring</code> and <code>/var/run/uapi-token-update</code>, and the four that an older uapi kept in <code>/tmp</code> with mode 0755 and files 0644. It removes each only when it is itself a directory that root owns. They hold the 24 h replay window of the idempotency cache and state that a reboot clears too, so each starts empty in a directory that uapi creates 0700: the counters start again from zero, which Prometheus reads as a reset, every token has a full burst, <code>recent_errors</code> is empty, and the idempotency cache replays nothing from before. The removal comes after the restart, because the previous version keeps writing those directories until uhttpd stops it. A request of the previous version still in flight at the restart can write one again, and that one stays until a reboot.</p>
+<p>After that, <code>https://&lt;router&gt;/api/v3/healthz</code> is reachable if uhttpd is enabled.</p>
 <p>The post-install message, printed only when the token store holds no token yet (so upgrades and reinstalls stay quiet):</p>
 <pre><code>uapi installed. Bootstrap:
   1. Create a token:    uapi-token create --name &lt;label&gt; --scope '*:rw'
@@ -112,7 +117,7 @@ Future upgrades from the project feed:
 <ol>
 <li>Removes the <code>ucode_prefix</code> entry from <code>uhttpd.main</code>.</li>
 <li>Commits uhttpd.</li>
-<li>Reloads uhttpd.</li>
+<li>Reloads uhttpd, if it is enabled.</li>
 </ol>
 <p>These three steps run BEFORE the handler file is deleted. Order matters: if the prefix entry survived past handler removal, uhttpd would dispatch <code>/api/v3/*</code> to a missing <code>main.uc</code> and every request would 500 until the operator manually fixed the uhttpd config. Reorder only with care.</p>
 <p>The token store at <code>/etc/config/uapi</code> is preserved (conffile semantics). To wipe it: <code>rm /etc/config/uapi</code> after removal.</p>
@@ -134,8 +139,8 @@ Future upgrades from the project feed:
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/packaging.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/packaging.md">repository</a>, never here.
+      Rendered from <code>docs/packaging.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/packaging.md">repository</a>, never here.
     </p>
   </div>
 </footer>

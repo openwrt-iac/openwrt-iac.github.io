@@ -25,7 +25,7 @@
     <h2>Three steps</h2>
     <div class="version-picker">
   <label for="uapi-version">Version to install</label>
-  <select id="uapi-version"><option value="3.1.0" selected>3.1.0 (current)</option><option value="2.5.1">2.5.1</option><option value="1.2.1">1.2.1</option></select>
+  <select id="uapi-version"><option value="3.2.0" selected>3.2.0 (current)</option><option value="2.5.1">2.5.1</option><option value="1.2.1">1.2.1</option></select>
 </div>
 <script>
   document.getElementById("uapi-version").addEventListener("change", function (e) {
@@ -35,7 +35,7 @@
   });
 </script>
 
-    <div class="version-steps" data-version="3.1.0">
+    <div class="version-steps" data-version="3.2.0">
     <ol>
       <li>
         <strong>Trust the feed signing key</strong>
@@ -60,7 +60,7 @@ apk update</code></pre>
       (currently uapi and unbound-uci-ext). Subsequent
       <code>apk add &lt;package&gt;</code> calls find them without further
       setup. Pin this exact build with
-      <code>apk add uapi=3.1.0-r1</code>.
+      <code>apk add uapi=3.2.0-r1</code>.
     </p>
     </div>
     <div class="version-steps" data-version="2.5.1" hidden>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Installation - uapi 3.1.0 docs</title>
+<title>Installation - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Installation</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Installation</p>
   </div>
 </header>
 
@@ -27,7 +27,7 @@
 </code></pre>
 <p>The post-install hook will:</p>
 <ol>
-<li>Run <code>/etc/uci-defaults/99-uapi</code> which adds <code>list ucode_prefix '/api/v3=/usr/share/uapi/main.uc'</code> to <code>uhttpd.main</code> and restarts uhttpd.</li>
+<li>Run <code>/etc/uci-defaults/99-uapi</code>, which adds <code>list ucode_prefix '/api/v3=/usr/share/uapi/main.uc'</code> to <code>uhttpd.main</code>, then restart uhttpd so that it loads the new code. Both the hook's reload and this restart run only when uhttpd is enabled, because on OpenWrt either one starts a stopped uhttpd, and an operator disables it when another web server owns the ports.</li>
 <li>Delete itself.</li>
 <li>Print the bootstrap message (first install only; suppressed on upgrade or reinstall).</li>
 </ol>
@@ -102,15 +102,15 @@ uci commit uhttpd
 <h2 id="removal">Removal</h2>
 <pre><code class="language-sh">apk del uapi
 </code></pre>
-<p>The pre-remove hook removes the <code>ucode_prefix</code> entry from <code>uhttpd.main</code> and reloads uhttpd. <code>/etc/config/uapi</code> (the token store) is conffile-marked and preserved across removal and upgrades. To wipe tokens: <code>rm /etc/config/uapi</code> after removal.</p>
+<p>The pre-remove hook removes the <code>ucode_prefix</code> entry from <code>uhttpd.main</code> and reloads uhttpd if it is enabled. <code>/etc/config/uapi</code> (the token store) is conffile-marked and preserved across removal and upgrades. To wipe tokens: <code>rm /etc/config/uapi</code> after removal.</p>
   </div>
 </section>
 
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/installation.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/installation.md">repository</a>, never here.
+      Rendered from <code>docs/installation.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/installation.md">repository</a>, never here.
     </p>
   </div>
 </footer>

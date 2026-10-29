@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ucode quirks that have bitten this project - uapi 3.1.0 docs</title>
+<title>ucode quirks that have bitten this project - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / ucode quirks that have bitten this project</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / ucode quirks that have bitten this project</p>
   </div>
 </header>
 
@@ -57,8 +57,17 @@ if (caught != null) die(caught);
 <p><code>uhttpd-mod-ucode</code> runs the handler in template mode (<code>{%</code>). Loading a raw-script <code>.uc</code> module from inside it needs explicit <code>loadfile(path, { raw_mode: true })</code>. The <code>load_resource</code> helper in <code>src/main.uc</code> does this for you.</p>
 <h3 id="typenull-returns-null-not-a-string"><code>type(null)</code> returns null, not a string</h3>
 <p>There is no type name for it: <code>type(null)</code> is the null value itself, so <code>type(x) == "null"</code> never matches. Test <code>x == null</code> directly.</p>
+<h3 id="coerces-as-in-javascript"><code>==</code> coerces, as in JavaScript</h3>
+<p><code>false == ""</code> and <code>0 == ""</code> are true, while <code>false == null</code> and <code>0 == null</code> are false. A test for an empty string written <code>v == ""</code> therefore also matches <code>false</code> and <code>0</code>: in <code>network.interfaces</code> it let <code>sourcefilter: false</code> pass as an empty value. Write <code>v === ""</code> when <code>v</code> can be a boolean or a number.</p>
+<h3 id="match-and-json-stop-at-the-first-nul"><code>match()</code> and <code>json()</code> stop at the first NUL</h3>
+<p><code>match("rule\u0000 x", /^[!-~]+$/)</code> returns <code>[ "rule" ]</code>: an anchored pattern checks only the prefix and passes. uci takes C strings and then stores <code>rule</code>. <code>json()</code> also cuts an object key at its first NUL, so <code>{"k\u0000x": 1}</code> parses as <code>{ "k": 1 }</code>. <code>main.uc</code> therefore refuses the NUL escape in the request text (<code>values.json_has_nul</code>) before any handler runs.</p>
 <h3 id="const-is-real"><code>const</code> is real</h3>
 <p><code>const X = ...</code> is parsed and enforced. Top-level data tables in this repo are mostly <code>const</code>.</p>
+<h3 id="fs-calls-return-null-on-failure-and-do-not-throw"><code>fs</code> calls return null on failure and do not throw</h3>
+<p><code>fs.rename</code>, <code>fs.unlink</code>, <code>fs.chmod</code> and the other <code>fs</code> calls report a failure by returning null and setting <code>fs.error()</code>. A <code>catch</code> around one never runs: the error ring and the metrics relied on one to remove the temp file after a failed rename, and left it behind. Test the return value. <code>fs.open()</code> is the exception: it returns null without setting <code>fs.error()</code>, so a failed open has no reason to report.</p>
+<h3 id="close-drops-the-write-error-and-flush-reports-it-backwards-on-the-ci-image"><code>close()</code> drops the write error, and <code>flush()</code> reports it backwards on the CI image</h3>
+<p>A small write only fills the stdio buffer, so <code>write()</code> answers its full length, and a file's <code>close()</code> ignores the result of <code>fclose</code>. Neither reports a write that the filesystem cannot hold. A <code>flush()</code> before the close does, but which way round depends on the ucode. On OpenWrt 25.12, with ucode 2026.01.16, a flush answers <code>true</code> when it works and <code>null</code> when it fails, with the error in <code>fs.error()</code>. ucode 0.0.20250529, which Alpine 3.24 ships and the unit job of CI runs, answers <code>null</code> from a flush that worked and <code>true</code> from one that failed, measured on <code>/dev/full</code>. ucode fixed this on 2025-11-27, before OpenWrt 25.12.0-rc1.</p>
+<p>uapi therefore checks no <code>flush()</code> result. A write that must catch a full filesystem compares the size of the file on disk with the length of what it wrote, as <code>replace_private_file()</code>, the feed create, the preshared key file, the idempotency cache and the metrics do, or reads the file back, as the restore does. Both checks work the same on either ucode, so a unit test runs them through a real file. <code>ulimit -f</code> in a child process, with <code>SIGXFSZ</code> ignored, fails a write to a regular file as a full filesystem does: 0 leaves the file empty, and 1 cuts it short after one block. Where a module writes a fixed path that a test cannot write, such as <code>/var/run/uapi.wg.psk</code>, the stub <code>fs</code> of <code>load_with_fs()</code> in <code>tests/harness.uc</code> creates the file in <code>/tmp</code> and hands the module a handle on <code>/dev/full</code>.</p>
 <h2 id="openwrt-runtime-integration">OpenWrt runtime integration</h2>
 <h3 id="uhttpd-cgi-status-header-needs-a-reason-phrase">uhttpd CGI Status header needs a reason phrase</h3>
 <p><code>Status: 200 OK</code> works; <code>Status: 200</code> is silently dropped and the response defaults to 200. Always include the reason.</p>
@@ -67,11 +76,16 @@ if (caught != null) die(caught);
 <h3 id="cursorgetpkg-sect-returns-the-section-type-not-the-dict"><code>cursor.get(pkg, sect)</code> returns the section TYPE, not the dict</h3>
 <p>To get the option dict, use <code>cursor.get_all(pkg, sect)</code>. This codebase wraps the call in <code>bus.uci_get</code> which does the right thing.</p>
 <h3 id="cursorexport-cursorimport-do-not-exist-in-ucode-mod-uci"><code>cursor.export</code> / <code>cursor.import</code> do not exist in ucode-mod-uci</h3>
-<p>The snapshot/restore mechanism in <code>transaction.uc</code> uses file IO on <code>/etc/config/&lt;pkg&gt;</code> plus <code>cursor.unload(pkg); cursor.load(pkg)</code>. If you need a snapshot somewhere new, use the existing helpers.</p>
+<p>The snapshot/restore mechanism in <code>transaction.uc</code> uses file IO on <code>/etc/config/&lt;pkg&gt;</code>: the <code>uci_export</code> of <code>bus.connect()</code> reads the file, and its <code>uci_import</code> writes a temp file beside the file that the package names and renames it over that file. libuci writes its temp file in the config directory instead, and renames it after it releases its flock on the package. If you need a snapshot somewhere new, use the existing helpers.</p>
+<h3 id="a-delta-directory-passed-to-cursor-does-not-hide-what-uci-set-staged">A delta directory passed to <code>cursor()</code> does not hide what <code>uci set</code> staged</h3>
+<p><code>uci.cursor(null, dir)</code> makes <code>dir</code> the directory that the cursor saves its changes in, and adds it to libuci's search path for delta files. <code>/tmp/.uci</code> stays in that path, and ucode offers no call that removes it. So a package that the cursor loads by name, including the load that <code>get()</code> or <code>set()</code> do on first use, still carries what a shell staged with <code>uci set</code>, and a <code>commit()</code> stores it while <code>/tmp/.uci</code> keeps it staged. rpcd clears the list in C. Measured with libuci 2025.12.02 and ucode 2026.01.16 of the OpenWrt 25.12 SDK.</p>
+<p><code>cursor.load("/etc/config/&lt;pkg&gt;")</code> loads the package by its path, and libuci applies no delta file to it. Later calls find it by its name. Two things change for such a package: <code>revert()</code> answers <code>Invalid argument</code>, and <code>commit()</code> writes the copy that the cursor holds instead of reading the file again and replaying the delta. <code>bus.uc</code> replays the writes of a request itself for that reason. A load by path also skips two checks of a load by name: it takes a name that starts with a dot, such as libuci's temp file <code>.firewall.uci-XXXXXX</code>, and it ignores an override in <code>/var/run/uci/&lt;pkg&gt;</code>.</p>
 <h3 id="ucode-mod-digest-exports-digestsha256s-directly"><code>ucode-mod-digest</code> exports <code>digest.sha256(s)</code> directly</h3>
 <p>It returns the hex digest. There is no separate <code>sha256_hex</code>.</p>
 <h3 id="cursorsetpkg-name-type-three-args-creates-a-named-section"><code>cursor.set(pkg, name, type)</code> (three args) creates a named section</h3>
 <p>Prefer this over <code>cursor.add</code> + <code>cursor.rename</code> when you want a specific name from the start. uapi uses ULID-named sections for everything it creates.</p>
+<h3 id="uci-writes-a-section-type-unquoted">uci writes a section type unquoted</h3>
+<p><code>uci_validate_type</code> takes any printable ASCII except the space, but the export writes <code>config &lt;type&gt;</code> without quotes. A type with <code>"</code>, <code>#</code>, <code>'</code>, <code>;</code> or <code>\</code> therefore commits and reads back as syntax: <code>config rule#x 's'</code> re-reads as an anonymous <code>rule</code>, and a quote leaves the package unparseable. Measured on OpenWrt 25.12.5. <code>src/raw.uc</code> refuses these five.</p>
 <h3 id="file-handle-locking-uses-single-char-flags">File-handle locking uses single-char flags</h3>
 <pre><code class="language-ucode">fd.lock(&quot;x&quot;)    // LOCK_EX
 fd.lock(&quot;s&quot;)    // LOCK_SH
@@ -79,6 +93,7 @@ fd.lock(&quot;n&quot;)    // LOCK_NB suffix, combine: &quot;xn&quot; for non-blo
 fd.lock(&quot;u&quot;)    // LOCK_UN
 </code></pre>
 <p>Returns <code>true</code> on success, <code>null</code> on <code>EWOULDBLOCK</code> (with <code>fs.error()</code> set). See <code>transaction.uc::_lock_one()</code>.</p>
+<p>An flock belongs to the open file description, and <code>fs.open</code> does not set <code>O_CLOEXEC</code> unless the mode carries <code>e</code> (<code>"w+e"</code>). Without it every child that <code>fs.popen</code> starts holds a copy of the descriptor, and so holds the lock until it exits. The ucode of the OpenWrt 25.12.5 SDK (2026.01.16) maps <code>e</code> to <code>O_CLOEXEC</code> in <code>uc_fs_open()</code>. With ucode 0.0.20250529, a child of <code>fs.popen</code> lists in <code>/proc/self/fd</code> a descriptor that was opened <code>w+</code>, and none that was opened <code>w+e</code>.</p>
 <h3 id="networkinterfacex-renew-re-applies-the-config-the-handler-already-had"><code>network.interface.&lt;x&gt;</code> <code>renew</code> re-applies the config the handler already had</h3>
 <p>netifd gives a proto handler a copy of the interface config taken when the proto state was attached, and <code>renew</code> does not refresh it. A renew issued after a uci write therefore re-applies what was already running, and returns success. netifd also tears the interface down and back up for any proto-config change, so editing a wireguard peer destroys a working tunnel before the new peer list has been validated. uapi applies wireguard peers with <code>wg</code> directly for both reasons; see <code>src/lib/wg.uc</code>.</p>
 <h3 id="every-daemon-parses-uci-booleans-differently">Every daemon parses uci booleans differently</h3>
@@ -160,6 +175,65 @@ someone reads ubox, <code>normalize_bool</code> is the conservative guess for th
 <code>system.urandom_seed</code> is the filesystem path the entropy seed is written to, and
 <code>lldpd</code>'s <code>lldp_description</code> is free text. Both were typed boolean, so a write
 replaced the operator's value with <code>"1"</code>.</p>
+<h3 id="netifd-reads-integers-and-lists-through-the-same-converter">netifd reads integers and lists through the same converter</h3>
+<p>uci's <code>blob.c</code> is also how netifd reads every INT32 and ARRAY option
+(<code>uci_attr_to_blob</code> and <code>uci_array_to_blob</code>), and neither matches the plain reader:</p>
+<table>
+<thead>
+<tr>
+<th>Option type</th>
+<th>What netifd takes</th>
+<th>Example</th>
+<th>uapi helper</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INT32: interface <code>metric</code>, <code>ip6assign</code>, <code>ip6weight</code> and <code>mtu</code>, route <code>metric</code> and <code>mtu</code>, rule <code>priority</code> and <code>goto</code>, device <code>mtu</code>, bridge-vlan <code>vlan</code></td>
+<td><code>strtol(v, &amp;end, 0)</code> with nothing left over: hex after <code>0x</code>, octal after <code>0</code></td>
+<td><code>0x10</code> is 16, <code>010</code> is 8, and <code>16</code> or <code>08</code> drop the option</td>
+<td><code>netifd_int</code></td>
+</tr>
+<tr>
+<td>ARRAY: <code>ipaddr</code>, <code>ip6addr</code>, <code>ip6prefix</code>, <code>ip6class</code>, <code>dns</code>, device and bridge-vlan <code>ports</code></td>
+<td>a list as it is, and a scalar split on spaces and tabs</td>
+<td><code>option dns '192.0.2.1 192.0.2.2'</code> is two servers</td>
+<td><code>as_word_list_or_null</code></td>
+</tr>
+<tr>
+<td>Routing table: route <code>table</code>, rule <code>lookup</code></td>
+<td><code>system_resolve_rt_table</code>: a number through <code>strtoul</code> base 0 above 0, then <code>default</code>, <code>main</code>, <code>local</code>, then a name in <code>/etc/iproute2/rt_tables</code>, whose id column it reads in base 10. netifd drops the route or rule when nothing resolves</td>
+<td><code>main</code> is 254, <code>0</code> drops the route</td>
+<td><code>rt_table_id</code>, which reads 0 for what does not resolve</td>
+</tr>
+</tbody>
+</table>
+<p>The wireless options do not go through blob.c. netifd's ucode side reads them from uci
+itself, and <code>/lib/netifd/utils.uc</code> converts an option of type number with <code>+v</code>. That takes
+whitespace around the number, <code>0x</code>, <code>0o</code> and <code>0b</code>, a fraction and an exponent. It reads
+<code>010</code> as 10, and any other text as NaN. wifi-scripts writes the number into hostapd's
+config, where <code>atoi()</code> reads NaN as 0. <code>ucode_int</code> reads <code>reassociation_deadline</code> and
+<code>r0_key_lifetime</code> of <code>wireless/interfaces</code> that way.</p>
+<p><code>as_int</code> reads decimal only, which is right for a reader that parses base 10 and
+wrong for netifd. <code>netifd_int</code> reads <code>""</code> and a value past int32 as null, where
+blob.c gives 0 and a truncated number that differs between 32- and 64-bit targets.
+A proto script that loops <code>for a in ${addresses}</code> splits a scalar the same way as
+an ARRAY option. A shell reader that goes through <code>config_get</code>, as <code>wireguard.sh</code>
+does for a peer's <code>allowed_ips</code>, also joins a list with spaces, so it splits a
+list entry that holds several words, where <code>as_word_list_or_null</code> keeps that
+entry whole and validation then refuses it. <code>config_get_words</code> reads such a value
+as the shell gets it, split at a newline too, and <code>lldpd/config.interface</code> and
+<code>dhcp/hosts.macs</code> use it, where LuCI's <code>L.toArray</code> keeps the entry whole. A
+peer's <code>allowed_ips</code> still reads with <code>as_word_list_or_null</code>. <code>config_get_bool</code>
+gets a list joined the same way, so <code>list disabled '1'</code> disables a wireguard
+peer: read such a value with <code>config_get</code> before <code>shell_bool</code>.</p>
+<p>The reverse also holds: blob.c drops a <code>list</code> given to an attribute that is not an ARRAY, so
+6rd, map and 464xlat, which declare <code>ip6prefix</code> as a string, lose a listed value. That is why
+uapi writes one <code>ip6prefix</code> as a scalar and only several as a list.</p>
+<p>busybox <code>ip</code> reports an id above 255 in <code>/etc/iproute2/rt_tables</code> as "database
+tables is corrupted", and <code>ip route show table 4255</code> answers "invalid argument",
+while netifd resolves such a name normally. A test that reads tables through <code>ip</code>
+needs an id of 255 or less.</p>
 <h3 id="real-ubus-and-uci-modules-are-so-packages">Real <code>ubus</code> and <code>uci</code> modules are <code>.so</code> packages</h3>
 <p>They live in the default <code>REQUIRE_SEARCH_PATH</code> ahead of any project paths. Naming a local lib <code>ubus.uc</code> shadows nothing because the <code>.so</code> wins. uapi calls its abstraction <code>bus.uc</code> to avoid the collision.</p>
 <h2 id="when-you-find-a-new-one">When you find a new one</h2>
@@ -170,8 +244,8 @@ replaced the operator's value with <code>"1"</code>.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/ucode-quirks.md">repository</a>, never here.
+      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/ucode-quirks.md">repository</a>, never here.
     </p>
   </div>
 </footer>

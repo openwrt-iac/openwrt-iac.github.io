@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Curated resources - uapi 3.1.0 docs</title>
+<title>Curated resources - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Curated resources</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Curated resources</p>
   </div>
 </header>
 
@@ -27,9 +27,11 @@ router) or open it in Swagger UI. Per-resource sample curls live in
 <p><code>GET /schema/&lt;package&gt;/&lt;resource&gt;</code> serves a module's declared properties as one set, without the
 request and response split the OpenAPI document makes. It is the module's own view: a property
 marked <code>readOnly</code> there is absent from that resource's <code>*Request</code> schema, a property marked
-<code>x-uapi-read-nullable</code> has <code>null</code> added to its type (and to its <code>enum</code>) in the <code>*Response</code>
-schema and not in the <code>*Request</code> one, and <code>id</code>, <code>managed</code> and <code>runtime</code> are stamped by the
-framework rather than declared by the module. For the two halves, read <code>build/openapi.json</code>.</p>
+<code>x-uapi-read-nullable</code> has <code>null</code> added to its type (and to its <code>enum</code>) in both halves, as the
+next paragraph explains, a property marked <code>x-uapi-write-string</code> keeps <code>string</code> in its type only
+in the <code>*Request</code> schema, the keywords under a property's <code>x-uapi-write</code> (such as <code>minimum: 68</code>
+on <code>mtu</code>) apply only in the <code>*Request</code> schema, and <code>id</code>, <code>managed</code> and <code>runtime</code> are stamped by
+the framework rather than declared by the module. For the two halves, read <code>build/openapi.json</code>.</p>
 <p><code>x-uapi-read-nullable</code> marks a property a read can answer null for, and widens its type (and
 <code>enum</code>) with null in <strong>both</strong> halves. Both, because every IaC apply is a read-modify-write: the
 response view goes back out as the next request body, so a request schema that refused those
@@ -51,6 +53,17 @@ returns <code>503 init_script_missing</code> with the missing
 <code>/etc/init.d/&lt;service&gt;</code> path in the response body, before any uci
 write. The pre-flight check is part of the atomic transaction recipe;
 no partial state is left behind.</p>
+<p>The uci config file has to exist too. <code>wireless/devices</code> and
+<code>wireless/interfaces</code> need <code>/etc/config/wireless</code>, which only
+wifi-scripts creates, with <code>wifi config</code> when it finds a radio. LuCI
+never creates a radio section. On a router or an image without it, a
+write answers <code>503 config_missing</code> with the missing path, before any uci
+write. That includes a PUT or PATCH of an id that a GET answers 404 for,
+as with <code>init_script_missing</code>. A DELETE answers 404, because no section
+can exist there, and a client reads that as already gone. A DELETE in a
+<code>POST /batch</code> answers the 503, because the batch commits as one write. A
+read answers an empty list. The same applies to any package whose file
+was removed. An empty file is enough.</p>
 <p>Install the daemon either out of band (<code>apk add unbound</code>, etc.) or
 through uapi itself via <code>POST /api/v3/packages/installed</code>. The latter
 is what a Terraform configuration would chain via <code>depends_on</code> on a
@@ -70,22 +83,22 @@ packages are deliberately not pulled in.</p>
 <tr>
 <td><code>network/interfaces</code></td>
 <td><code>config interface</code></td>
-<td>Static/dhcp/dhcpv6/pppoe/wireguard. Optional <code>id</code> picks the section name at create time (uci section-name charset, 32 chars, tightened to 15 for <code>proto=wireguard</code> because netifd uses it as the kernel netdev name); absent, the server emits a 14-char <code>wg_&lt;rand&gt;</code> for wireguard or a 28-char ULID otherwise. <code>runtime</code> block carries live ubus state (uptime, ipv4/ipv6 addresses, route table).</td>
+<td>Protos static, dhcp, dhcpv6, pppoe, ppp, wwan, wireguard and none. Optional <code>id</code> picks the section name at create time (uci section-name charset, 32 chars, tightened to 15 for <code>proto=wireguard</code> because netifd uses it as the kernel netdev name); absent, the server emits a 14-char <code>wg_&lt;rand&gt;</code> for wireguard or a 28-char ULID otherwise. <code>runtime</code> block carries live ubus state (uptime, ipv4/ipv6 addresses, route table). Some fields apply only to some protos, as the <code>allOf</code> entries on <code>proto</code> in the spec say: a read omits the others, a write that names one with a value other than null, <code>""</code> or <code>[]</code> answers <code>422 conflict</code>, and a proto switch removes the old proto's options. The options that netifd reads for every proto (<code>metric</code>, <code>defaultroute</code>, <code>delegate</code>, <code>ip4table</code>, <code>ip6table</code>, <code>dns</code>, <code>mtu</code>, the <code>ip6assign</code> group) apply to all of them. netifd applies <code>mtu</code> to the interface's device only when that device has no <code>config device</code> section of its own, as <code>br-lan</code> has in the stock configuration, and to every device that joins the interface later, such as a Wi-Fi netdev. A device with its own section takes its MTU from <code>network/devices</code>. On ppp and pppoe, <code>mtu</code> goes to pppd, which takes 128 to 16384. <code>listen_port</code> reads a service name as the port that wg resolves, and -1 when the name does not resolve. A write that switches an enabled interface to wireguard, or enables a wireguard interface, answers <code>422 conflict</code> while one of its stored <code>network/wireguard_peers</code> holds a value for which a peer write refuses to enable the peer, such as one that makes wg refuse the whole interface. A PATCH that switches an enabled interface to wireguard and leaves <code>listen_port</code> out answers <code>422 conflict</code> on <code>listen_port</code> while uci holds a hand-written value that reads -1, which the read of the old proto does not show: <code>null</code> in the switch removes it, and a PUT removes it anyway. On a proto that uapi does not model, such as <code>6in4</code>, a read shows the modelled options that uci stores, a POST or PUT answers <code>422 not_in_enum</code>, and a PATCH that leaves <code>proto</code> out refuses only <code>broadcast_flag</code> and keeps the options of the proto's handler.</td>
 </tr>
 <tr>
 <td><code>network/devices</code></td>
 <td><code>config device</code></td>
-<td>Bridges, VLANs (8021q/8021ad), macvlan, veth, tun/tap.</td>
+<td>Bridges, VLANs (8021q/8021ad), macvlan, veth, tun/tap. <code>mtu</code> below 68 is refused on write, because netifd ignores it. A stored one reads as it is.</td>
 </tr>
 <tr>
 <td><code>network/routes</code></td>
 <td><code>config route</code></td>
-<td>Static routes; cross-refs interface.</td>
+<td>Static routes; cross-refs interface. <code>table</code> reads a stored name as its id (253 <code>default</code>, 254 <code>main</code>, 255 <code>local</code>, or the id in <code>/etc/iproute2/rt_tables</code>), and 0 when netifd cannot resolve it and drops the route. A write takes an id from 1 to 4294967295.</td>
 </tr>
 <tr>
 <td><code>network/rules</code></td>
 <td><code>config rule</code></td>
-<td>Policy routing.</td>
+<td>Policy routing. <code>lookup</code> reads and writes like the <code>table</code> of <code>network/routes</code>. netifd parses no <code>lookup</code> or <code>goto</code> action: a rule without <code>action</code> is a goto rule when <code>goto</code> is set and a lookup rule otherwise, so a read derives <code>action</code> that way and a write stores no action for those two. A <code>goto</code> must jump forward, past <code>priority</code>, and goes only with action goto.</td>
 </tr>
 <tr>
 <td><code>network/bridge_vlans</code></td>
@@ -95,7 +108,7 @@ packages are deliberately not pulled in.</p>
 <tr>
 <td><code>network/wireguard_peers</code></td>
 <td><code>config wireguard_&lt;iface&gt;</code> (dynamic)</td>
-<td>Peers on a wireguard interface; preshared_key masked on read.</td>
+<td>Peers on a wireguard interface; preshared_key masked on read. <code>endpoint_port</code> reads a service name such as <code>https</code> as its port from <code>/etc/services</code>, as wg resolves it, and 0 when the name does not resolve. <code>persistent_keepalive</code> reads <code>off</code> as 0, and -1 when wg cannot read the stored value.</td>
 </tr>
 </tbody>
 </table>
@@ -172,12 +185,12 @@ daemon's runtime convergence.</p>
 <tr>
 <td><code>wireless/devices</code></td>
 <td><code>config wifi-device</code></td>
-<td>Radios (mac80211/broadcom), band, channel, htmode, country, txpower.</td>
+<td>Radios (mac80211/broadcom), the <code>path</code>, <code>macaddr</code>, <code>phy</code> and <code>radio</code> that bind them to their hardware, band, channel, htmode, country, txpower, cell_density, legacy_rates.</td>
 </tr>
 <tr>
 <td><code>wireless/interfaces</code></td>
 <td><code>config wifi-iface</code></td>
-<td>SSIDs. <code>key</code> write-only; responses include <code>has_key: bool</code>. <code>runtime</code> carries iwinfo state.</td>
+<td>SSIDs, with every 802.11r option of LuCI's WLAN roaming tab. <code>key</code>, <code>r0kh</code> and <code>r1kh</code> are write-only, and a PUT that leaves them out keeps them. Responses include <code>has_key</code>, <code>has_r0kh</code> and <code>has_r1kh</code>. wifi-scripts writes <code>key</code>, <code>nasid</code>, <code>mobility_domain</code>, <code>r1_key_holder</code>, <code>r0kh</code> and <code>r1kh</code> into the daemon's config as lines, so a write refuses a newline in them, more than 1024 bytes in each of them but <code>key</code>, and a key holder entry that hostapd reads and cannot parse. A write is refused for such a value only when it adds the error, for example when it changes the field, sets the SSID up, which wifi-scripts does only while the SSID and its radio are enabled, or turns 802.11r on. A write also refuses the values that the daemons refuse or misread: an <code>ssid</code> over 32 bytes, a <code>key</code> in a form that hostapd or wpa_supplicant refuses for the mode and encryption, a <code>nasid</code> over 253 bytes on an EAP access point, <code>ieee80211r</code> with owe on an access point, a <code>reassociation_deadline</code> outside 1000 to 65535, a <code>mobility_domain</code> other than 4 hex digits, an <code>r1_key_holder</code> other than 12, and mode <code>wds</code>. The same rule applies to these: a write that leaves a stored value as it is is refused for it only when it makes the daemon read it. hostapd reads <code>mobility_domain</code> as the mobility domain with 802.11r, and as the EAP domain of an access point with <code>fils</code>, which uapi does not model. That domain takes any form, so a newline or a length in <code>mobility_domain</code> counts on an EAP access point too, and its form only with 802.11r. A write to <code>wireless/devices</code> that turns a radio on is refused while an enabled SSID of the radio holds any of these values. The validation sweep lists every SSID that holds such a value. These rules follow the ucode wifi-scripts, which OpenWrt 25.12 builds by default. They were not checked against the shell wifi-scripts, which OpenWrt 24.10 uses: uapi supports 25.12 and later, where the shell variant runs only on an image built without <code>CONFIG_WIFI_SCRIPTS_UCODE</code>. <code>validate()</code> and the schema check run as before: every write still requires <code>key</code> for the EAP modes, which LuCI writes without one. A create or a PUT that sends no <code>mode</code> stores <code>ap</code>, which a read reports for a section with no mode. A write that sends a null <code>mode</code> answers 422 <code>required</code>: wifi-scripts sets up no interface without a mode, and storing <code>ap</code> would turn a station into an access point. <code>runtime</code> carries iwinfo state.</td>
 </tr>
 </tbody>
 </table>
@@ -201,7 +214,7 @@ daemon's runtime convergence.</p>
 <tr>
 <td><code>dhcp/servers</code></td>
 <td><code>config dhcp</code></td>
-<td>Per-interface server config. <code>runtime</code> carries active-lease counts.</td>
+<td>Per-interface server config. <code>runtime</code> carries active-lease counts. <code>dhcp_option</code> takes one option per entry, because dnsmasq.init passes each entry to dnsmasq whole and dnsmasq reads it as one option. An entry answers <code>422 invalid_format</code> when, outside a quoted string, a field that reads as an address, such as <code>10.0.0.1</code> or <code>[::]</code>, is followed by whitespace and then by what starts a <code>dhcp-option</code> value: a number and a comma, <code>option:</code>, <code>option6:</code>, <code>tag:</code>, <code>net:</code>, <code>set:</code>, <code>vendor:</code>, <code>encap:</code> or <code>vi-encap:</code>, as in <code>3,10.0.0.1 6,10.0.0.1</code>. LuCI's form takes any entry. A text option with spaces, such as <code>15,my domain</code> or <code>15,my 6,domain</code>, stays valid, and a write that leaves a stored list as it is passes. Other entries that dnsmasq refuses, such as <code>3,10.0.0.1, 6,10.0.0.1</code>, pass the rule and are left to the <code>--test</code> check below.</td>
 </tr>
 <tr>
 <td><code>dhcp/dnsmasq</code> (singleton)</td>
@@ -225,7 +238,8 @@ daemon's runtime convergence.</p>
 </tr>
 </tbody>
 </table>
-<p>Reload: <code>dnsmasq</code>, except <code>dhcp/odhcpd</code>, which declares <code>odhcpd</code>.</p>
+<p>Reload: <code>dhcp/servers</code> and <code>dhcp/hosts</code> reload <code>dnsmasq</code>, and then <code>odhcpd</code> while procd runs it. odhcpd reads a server section too, <code>ra</code>, <code>dhcpv6</code> and <code>ra_default</code> among others, and the static leases of a host. <code>dhcp/odhcpd</code> reloads <code>odhcpd</code>, and then <code>dnsmasq</code> while procd runs it, because dnsmasq.init reads <code>maindhcp</code>. <code>dhcp/dnsmasq</code> reloads <code>dnsmasq</code>. procd runs a service from its start to its stop, and a daemon that the router does not ship or that the operator stopped is skipped: the write does not answer <code>503 init_script_missing</code> for it, and its reload does not start it. LuCI saves through rpcd, which fires the procd reload trigger on <code>dhcp</code> of each daemon that runs, such as dnsmasq, odhcpd and unbound. A commit through libuci fires none. uapi runs the reloads above itself, and reloads no other daemon that watches <code>dhcp</code>.</p>
+<p>After a write that reloads dnsmasq, uapi runs the command of each dnsmasq instance with <code>--test</code> on the config that dnsmasq.init just wrote. If dnsmasq refuses it, the write answers <code>500 reload_failed_restored</code> and restores the previous config. dnsmasq refuses a line such as a <code>dhcp_option</code> of <code>3,not-an-address</code> in a section that it reads, one that is not ignored, on an interface that is up and static. The check covers every instance, one that is not running included, so on a router whose dnsmasq config was refused before the write, a write that does not fix it answers <code>500 reload_failed_unrecovered</code>. <code>--test</code> only parses: a config that dnsmasq parses but cannot start with, such as one whose port another daemon holds, still answers 2xx. No write waits for the daemon to start, and each pays one parse of the whole config per instance, which grows with its size, and again on a restore.</p>
 <h2 id="system">System</h2>
 <table>
 <thead>
@@ -385,6 +399,7 @@ daemon's runtime convergence.</p>
 </tr>
 </tbody>
 </table>
+<p>When unbound runs, a write to one of the three unbound resources waits 2 s after the reload. If unbound stops in that time, the write answers <code>500 reload_failed_restored</code> and restores the previous config. unbound stops for a line of <code>srv_line</code> or <code>ext_line</code> that it cannot parse. Two of these writes at the same time answer <code>423 locked</code> for the second, because each restarts unbound.</p>
 <h2 id="packages-non-uci">Packages (non-uci)</h2>
 <table>
 <thead>
@@ -458,7 +473,7 @@ composition rules, and stability caveat.</p>
 <tr>
 <td><code>GET /tokens</code>, <code>POST /tokens</code>, <code>DELETE /tokens/&lt;id&gt;</code></td>
 <td><code>uapi:tokens:rw</code> (or <code>*:rw</code>)</td>
-<td>HTTP token rotation. POST requires the requested scopes to be a strict subset of the caller's.</td>
+<td>HTTP token rotation. POST requires the caller's scopes to cover the requested scopes, equal or narrower.</td>
 </tr>
 <tr>
 <td><code>GET /metrics</code></td>
@@ -483,8 +498,8 @@ composition rules, and stability caveat.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/resources.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/resources.md">repository</a>, never here.
+      Rendered from <code>docs/resources.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/resources.md">repository</a>, never here.
     </p>
   </div>
 </footer>

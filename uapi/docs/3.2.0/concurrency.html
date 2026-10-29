@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Concurrency rules for contributors - uapi 3.1.0 docs</title>
+<title>Concurrency rules for contributors - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Concurrency rules for contributors</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Concurrency rules for contributors</p>
   </div>
 </header>
 
@@ -34,7 +34,7 @@
 <li><strong>Compute static tables at startup.</strong> <code>RESOURCES</code>, <code>SINGLETONS</code>, <code>KNOWN_PATHS</code>, all the resource module return-objects are built once and treated as read-only.</li>
 <li><strong>Read uci on every request.</strong> uci reads are millisecond-scale and the request volume is low. There is no benefit to caching uci state in memory across requests, and the integration test for the parent-fork model would catch you if you tried.</li>
 <li><strong>Acquire flocks before writing.</strong> Use <code>transaction.transaction()</code> for single-package uci writes; it takes SH on the global lock + EX on the per-package lock. Use <code>transaction.with_lock()</code> for non-uci writes; it takes EX on the global. Use <code>transaction.multi_transaction()</code> for cross-package atomic writes (<code>/batch</code>).</li>
-<li><strong>Use file-backed state for cross-request data.</strong> The token-bucket rate limiter writes to <code>/tmp/uapi-ratelimit/&lt;token&gt;.txt</code>. The idempotency cache writes to <code>/tmp/uapi-idempotency/</code>. File IO + atomic rename + flock is the cross-fork channel.</li>
+<li><strong>Use file-backed state for cross-request data.</strong> The token-bucket rate limiter writes to <code>/var/run/uapi-ratelimit/&lt;token&gt;.txt</code>. The idempotency cache writes to <code>/var/run/uapi-idempotency/</code>. File IO + atomic rename + flock is the cross-fork channel.</li>
 </ul>
 <h2 id="what-you-cannot-do">What you cannot do</h2>
 <h3 id="no-module-level-mutable-state-for-caching">No module-level mutable state for caching</h3>
@@ -77,9 +77,14 @@ function get_tokens() {
 <td>a uci transaction on <code>&lt;package&gt;</code></td>
 <td>serializes writes to the same package; cross-package writes do not collide</td>
 </tr>
+<tr>
+<td><code>/var/lock/uapi.pkg.unbound.lock</code> (EX)</td>
+<td>also a uci transaction on <code>unbound_srv</code> or <code>unbound_ext</code></td>
+<td>serializes the writes that restart unbound, so that the stay-up check of one does not see the restart or the config of another</td>
+</tr>
 </tbody>
 </table>
-<p>This is the recipe taken by <code>transaction.uc</code>. New write paths should go through one of the three existing entry points (<code>transaction()</code>, <code>multi_transaction()</code>, <code>with_lock()</code>) so the locking is consistent. Direct <code>fs.open</code> + <code>fs.lock</code> in a new code path is a smell; pause and check if you can route through <code>transaction.uc</code> instead.</p>
+<p>This is the recipe taken by <code>transaction.uc</code>. New write paths should go through one of the three existing entry points (<code>transaction()</code>, <code>multi_transaction()</code>, <code>with_lock()</code>) so the locking is consistent. Direct <code>fs.open</code> + <code>fs.lock</code> in a new code path is a smell; pause and check if you can route through <code>transaction.uc</code> instead. <code>uapi-token</code> writes <code>/etc/config/uapi</code> outside a request, so it takes the same locks as a uci transaction on <code>uapi</code> through <code>transaction.acquire_pkg_waiting()</code>, which polls for a bounded time rather than answer 423.</p>
 <p>Reading uci state acquires no lock. One thing rides along with a GET though: the
 last-used stamp on the presenting token is written through a real <code>uapi</code>-package transaction,
 so roughly one authed request per token per minute does take SH on the global lock plus EX on
@@ -145,8 +150,8 @@ upper-bound throughput is then the transaction's own latency
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/concurrency.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/concurrency.md">repository</a>, never here.
+      Rendered from <code>docs/concurrency.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/concurrency.md">repository</a>, never here.
     </p>
   </div>
 </footer>

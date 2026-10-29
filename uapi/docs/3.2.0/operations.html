@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Operations - uapi 3.1.0 docs</title>
+<title>Operations - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Operations</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Operations</p>
   </div>
 </header>
 
@@ -31,15 +31,44 @@ background.</p>
 <p>Two signals worth wiring into your automation:</p>
 <ul>
 <li><strong><code>X-Reload-Status</code></strong> response header on curated-resource writes: <code>ok</code> means the init
-  script ran and exited 0; <code>no_reload</code> means the resource has no reload
-  services. The header is intentionally not a "converged" promise.
-  In practice you will only ever see <code>ok</code>: all 42 writable resources declare
-  at least one reload service, so <code>no_reload</code> describes a resource shape that
-  does not currently exist. <code>system</code> used to be cited here as the example and
-  is not one, since it reloads <code>system</code> and <code>log</code>.</li>
+  script ran and exited 0, and <code>no_reload</code> means that no init script ran. The header is
+  intentionally not a "converged" promise. All 42 writable resources declare at least
+  one reload service, so <code>no_reload</code> means that the write changed nothing in uci, such as
+  a PATCH that names no field or sends the values that uci holds. A write that commits
+  nothing reloads nothing, since 3.2.0.</li>
 <li><strong><code>X-Reload-Services</code></strong>: comma-separated list of init scripts that
   ran. Useful for audit/log correlation.</li>
 </ul>
+<p>unbound and dnsmasq are the exceptions. When unbound runs, a write that
+reloads <code>unbound</code> or <code>unbound-uci-ext</code> waits 2 s for each unbound instance to
+keep running. If one stops, the write answers <code>500 reload_failed_restored</code>,
+and its <code>reload_error</code> reads
+<code>unbound stopped after the reload, with exit code 1</code>. So a 2xx on these writes
+also means that procd did not report unbound as stopped in the 2 s after the
+reload. An instance that <code>service list</code> does not show, because something
+restarts it or the ubus call fails, does not count, and a daemon that stops
+later than 2 s still answers 2xx.</p>
+<p>dnsmasq is checked by its config. After a write that reloads <code>dnsmasq</code>, as a
+write to <code>dhcp/servers</code>, <code>dhcp/hosts</code>, <code>dhcp/dnsmasq</code>, the raw <code>dhcp</code> package
+or a <code>/batch</code> that holds one does, and a write to <code>dhcp/odhcpd</code> while procd
+runs dnsmasq, uapi runs the command of each dnsmasq
+instance with <code>--test</code> on the config that dnsmasq.init just wrote. If dnsmasq
+refuses it, the write answers <code>500 reload_failed_restored</code>, and its
+<code>reload_error</code> reads, for example,
+<code>dnsmasq refuses its config cfg01411c: bad IP address at line 33 of /var/etc/dnsmasq.conf.cfg01411c</code>.
+The check covers every instance, one that is not running included, since
+procd starts it on that config. So on a router whose dnsmasq config was
+refused before the write, a write that does not fix it answers
+<code>500 reload_failed_unrecovered</code>. <code>--test</code> parses the config and the files of
+<code>conf-file</code> and <code>conf-dir</code>, and exits. It does not read the files of
+<code>addn-hosts</code> and <code>servers-file</code>, which dnsmasq reads after it starts. A config
+that dnsmasq parses but cannot start with, such as <code>min-port</code> above
+<code>max-port</code>, a <code>dhcp-leasefile</code> in a missing directory or a port that another
+daemon holds, still answers 2xx. No write waits for the daemon to start. Each
+write pays one parse of the whole config per instance, which grows with its
+size, such as a <code>conf-dir</code> of adblock lists, and pays it again on a restore.
+OpenWrt's reload of dnsmasq can restart the daemon, which on a slow machine can
+leave it stopped for 5 s, and uapi does not report that restart.</p>
 <p>For high-stakes writes (the management interface, firewall defaults,
 uhttpd itself) verify convergence out-of-band: poll the <code>runtime</code> block
 on the resource you just modified, check ubus state, or simply ping the
@@ -160,8 +189,10 @@ uapi[1234]: uapi-insecure-bypass 01HX67890ABCDEFGHJKMNNNNNN GET /system status=2
 <h2 id="metrics">Metrics</h2>
 <p><code>GET /api/v3/metrics</code> returns Prometheus 0.0.4 text. Scope: <code>uapi:metrics:ro</code>
 (covered by <code>*:ro</code>). Counters and histograms are file-backed under
-<code>/tmp/uapi-metrics/</code> (tmpfs - resets on reboot, which is fine for
-operational counters; aggregate longer-term retention server-side).</p>
+<code>/var/run/uapi-metrics/</code> (tmpfs - resets on reboot, which is fine for
+operational counters; aggregate longer-term retention server-side).
+A package install or upgrade resets them too, and Prometheus reads that
+as a counter reset.</p>
 <p>Series:</p>
 <table>
 <thead>
@@ -175,7 +206,7 @@ operational counters; aggregate longer-term retention server-side).</p>
 <tr>
 <td><code>uapi_requests_total</code></td>
 <td>counter</td>
-<td><code>method</code>, <code>path</code> (template, e.g. <code>/firewall/rules/:id</code>), <code>status</code>, <code>token_id</code> (<code>-</code> if pre-auth)</td>
+<td><code>method</code>, <code>path</code> (template, e.g. <code>/firewall/rules/:id</code>, or <code>unmatched</code>), <code>status</code>, <code>token_id</code> (<code>-</code> if pre-auth, <code>-retired</code> for tokens that no longer authenticate)</td>
 </tr>
 <tr>
 <td><code>uapi_request_duration_seconds_bucket</code></td>
@@ -190,7 +221,7 @@ operational counters; aggregate longer-term retention server-side).</p>
 <tr>
 <td><code>uapi_rate_limit_drops_total</code></td>
 <td>counter</td>
-<td><code>token_id</code></td>
+<td><code>token_id</code> (<code>-retired</code> as above)</td>
 </tr>
 <tr>
 <td><code>uapi_lock_contention_total</code></td>
@@ -206,10 +237,55 @@ operational counters; aggregate longer-term retention server-side).</p>
 </table>
 <p>Path templates are normalized (<code>/firewall/rules/:id</code> not the concrete
 ULID) to keep label cardinality bounded as clients create/destroy
-resources. The <code>token_id</code> label is bounded by the operator-configured
-token count (typically a small set); pre-auth failures (401 before
-authorize completes) carry <code>token_id="-"</code> so the series row still
-aggregates.</p>
+resources. A path that no route serves records <code>path="unmatched"</code>, and a
+<code>/raw</code> path keeps its package only when <code>/etc/config</code> holds it. Pre-auth
+failures (401 before authorize completes) carry <code>token_id="-"</code> so the
+series row still aggregates. A counter file that holds no count, which a
+full <code>/tmp</code> could leave behind, is left out of a scrape and starts again
+at its next increment.</p>
+<p>The <code>token_id</code> label is not bounded by the operator, because a client can
+mint a token per run, as the Terraform provider's ephemeral <code>uapi_token</code>
+does. A mint and a revoke bound it, over HTTP and with <code>uapi-token</code>, under
+the lock of the <code>uapi</code> package. After its commit, each one folds every
+series of a token that no longer authenticates (revoked, expired, or
+deleted from <code>/etc/config/uapi</code> by hand) into the series with the same
+other labels and <code>token_id="-retired"</code>, which no token can be named. The
+count is added there, and the token's file is deleted once the added count
+is on disk. The values of <code>token_id</code> are then the tokens that still
+authenticated at the last mint or revoke, <code>-</code> and <code>-retired</code>, and two kinds
+that the next mint or revoke folds: a token that revoked itself, as its
+revoke is recorded after the fold, and a token with a request in flight
+at its revoke. A client that mints tokens with no expiry and never revokes
+them keeps every one of them live, and nothing bounds those.</p>
+<p>What a scrape sees at a fold: the token's series is gone, and the
+<code>-retired</code> series of the same method, path and status has grown by the
+token's count. Folds run one at a time under the lock, so none of them
+loses an update of <code>-retired</code>. A sum over <code>token_id</code>, such as
+<code>sum without (token_id) (uapi_requests_total)</code>, keeps its value across a
+fold, with three exceptions:</p>
+<ul>
+<li>A scrape that overlaps a fold can count the token twice, or leave it
+  out, and a recording rule that sums before <code>rate()</code> reads the second
+  case as a counter reset.</li>
+<li>A request of the token that is in flight at its revoke can write the
+  token's series again after the fold, and the next fold adds that count
+  again, so it is counted twice.</li>
+<li>A kill between the add and the delete counts the token twice at the
+  next fold in the same way.</li>
+</ul>
+<p>The requests of a token that a scrape saw once or never, which is usual
+for a token per run, reach Prometheus through <code>-retired</code>, but only once
+that series exists. The first fold into a label set creates the <code>-retired</code>
+series at the token's count, and <code>rate()</code> does not count the first value
+of a series, so those requests show only in the sum. The cost is with
+<code>rate()</code>: it reads each later fold as requests at the moment of the fold,
+so <code>sum(rate(uapi_requests_total[5m]))</code> shows a spike after a mint or a
+revoke, and counts a second time the part of a token's requests that its
+own series already showed. For a long-lived token that is revoked, that is
+most of its history at once. Deleting the series instead would have kept
+the requests of a short-lived token out of <code>rate()</code>, and made each sum
+fall at a revoke, which a recording rule that sums before <code>rate()</code> reads
+as a counter reset.</p>
 <p>Sample Prometheus scrape config:</p>
 <pre><code class="language-yaml">scrape_configs:
   - job_name: uapi
@@ -226,7 +302,7 @@ aggregates.</p>
 curated <code>prometheus_node_exporter_lua/config</code> resource manages
 node_exporter's config separately.</p>
 <h2 id="rate-limiting">Rate limiting</h2>
-<p>Per-token token-bucket, file-backed at <code>/tmp/uapi-ratelimit/&lt;token&gt;.txt</code>.
+<p>Per-token token-bucket, file-backed at <code>/var/run/uapi-ratelimit/&lt;token&gt;.txt</code>.
 Defaults: <strong>100 req/s, burst 200</strong> per token. Tune globally via
 <code>/etc/config/uapi</code>:</p>
 <pre><code>config ratelimit
@@ -265,7 +341,8 @@ envelopes. Scope: <code>uapi:diagnostics:ro</code>.</p>
 <h3 id="finding-sections-a-write-would-reject-validate1">Finding sections a write would reject (<code>?validate=1</code>)</h3>
 <p><code>GET /api/v3/diagnostics?validate=1</code> adds a validation sweep: every section of
 every resource the token may read is run through the same path a write takes, and
-the ones that would be rejected are reported with the reason.</p>
+the ones that would be rejected are reported with the reason, together with the
+ones that hold a value that a write cannot add.</p>
 <pre><code class="language-json">{
   &quot;invalid_sections&quot;: [
     { &quot;resource&quot;: &quot;firewall/rules&quot;, &quot;id&quot;: &quot;sweepbad&quot;, &quot;managed&quot;: true,
@@ -280,6 +357,18 @@ the ones that would be rejected are reported with the reason.</p>
 upgrade, rather than one <code>422</code> at a time during a write. Every section it reports
 is already broken on the router: the rule above is already matching a whole
 protocol rather than a port. The sweep is the first time anyone is told.</p>
+<p>One finding is not a break. An interface on a proto that uapi does not model, such as
+the <code>6in4</code> that LuCI writes, is listed with <code>proto</code> and <code>not_in_enum</code>, because a PUT of
+it is refused: a PUT replaces the section and would delete the options of the tunnel.
+The tunnel itself works, and a PATCH that leaves <code>proto</code> out is accepted.</p>
+<p>A <code>validate_new()</code> rule (<code>docs/adding-a-resource.md</code>) is not a break either, until the
+daemon reads the value. Another writer can store a value that such a rule refuses, and
+the sweep lists it whether the daemon reads it yet or not: the section can be disabled,
+its mode can leave the field unused, or the radio of an SSID can be disabled. A write is
+refused for such a value only when it
+adds the error, for example when it changes the field or enables the section. The sweep
+lists the section because another writer, such as LuCI, can enable it later. Each error of such
+a rule has <code>live</code>, which is <code>false</code> when the daemon does not read the value yet.</p>
 <p>Three things worth knowing:</p>
 <ul>
 <li><strong>Opt-in on purpose.</strong> Each resource walks its own uci package, so a package is
@@ -308,10 +397,13 @@ section to name:</p>
 not be checked must not be reported as clean.</p>
 <p><code>dhcp/leases</code> and <code>dhcp/leases6</code> are not swept. They are read-only views of
 daemon state with no validation to run.</p>
-<p>The <code>recent_errors</code> ring is best-effort: writes to <code>/tmp/uapi-error-ring/</code>
+<p>The <code>recent_errors</code> ring is best-effort: writes to <code>/var/run/uapi-error-ring/</code>
 must never disrupt the actual response, so a disk-full or permission
 failure simply produces an empty ring rather than a 5xx on the original
-request. The ring caps at 20 entries (oldest dropped first).</p>
+request. The ring caps at 20 entries (oldest dropped first), and keeps the
+first 512 bytes of each message, ending a cut one with <code>...</code>: a 400 for a
+control character in a body names the key before authentication, so an
+unclipped message let any client store a body of any size in RAM.</p>
 <p><code>lock_state</code> reports which uapi lock files exist under <code>/var/lock</code>, not
 which locks are held right now: <code>flock</code> is released when the fd closes
 and the file itself is never unlinked, so an entry means that package
@@ -386,8 +478,8 @@ package they installed.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/operations.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/operations.md">repository</a>, never here.
+      Rendered from <code>docs/operations.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/operations.md">repository</a>, never here.
     </p>
   </div>
 </footer>

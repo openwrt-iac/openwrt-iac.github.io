@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi security model - uapi 3.1.0 docs</title>
+<title>uapi security model - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / uapi security model</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / uapi security model</p>
   </div>
 </header>
 
@@ -35,8 +35,8 @@
    on each request is acceptable: tokens are few, hashes are fast, and
    compromising the server's <code>/etc/config/uapi</code> exposes only hashes.</li>
 <li><strong>Privilege escalation via HTTP token-mint.</strong> <code>POST /tokens</code> is gated by
-   <code>uapi:tokens:rw</code>, AND the requested scopes must be a strict subset of the
-   caller's own - escalation returns <code>403 scope_escalation_blocked</code>. A
+   <code>uapi:tokens:rw</code>, AND the requested scopes must be covered by the caller's
+   own, equal or narrower - escalation returns <code>403 scope_escalation_blocked</code>. A
    compromised low-privilege token cannot mint an admin token over the API.</li>
 <li><strong>Stolen-token reuse from elsewhere.</strong> Optional <code>allowed_cidrs</code> on a
    token pins it to a source CIDR list; requests from outside return
@@ -56,7 +56,14 @@
    <code>^[A-Za-z0-9_-]+$</code> (or <code>^[A-Za-z0-9_+][A-Za-z0-9_+.-]*$</code> for packages)
    before interpolating, and uses <code>--</code> to separate flags from positional
    arguments. Service names from ucitrack are validated before
-   interpolating into <code>/etc/init.d/&lt;svc&gt;</code>.</li>
+   interpolating into <code>/etc/init.d/&lt;svc&gt;</code>. The WireGuard apply path in
+   <code>src/lib/wg.uc</code> builds each <code>wg</code> and <code>ip</code> command as an argument list,
+   and one function quotes every argument with <code>shellquote</code>, because the
+   restore after a failed write reads peers straight from uci, where a
+   value never passed <code>validate()</code>. wg.uc also checks the values before it
+   runs a command. A value that uapi stores for a daemon is a separate
+   path, because the daemon or its scripts read it later. See
+   <a href="#values-that-a-daemon-reads-later">Values that a daemon reads later</a>.</li>
 <li><strong>Replay attacks on POST under network flakiness.</strong> <code>Idempotency-Key</code>
    caches the response for 24 h; a network-blipped retry returns the cached
    response, not a duplicate side effect. Same key with a different body
@@ -175,13 +182,18 @@
 </tbody>
 </table>
 <h3 id="scopes-that-grant-root">Scopes that grant root</h3>
-<p>Some write scopes let the holder run code as root directly. Grant each one as if it were
-<code>*:rw</code>:</p>
+<p>Some write scopes let the holder run code as root directly, or choose a file that a root daemon
+writes. Grant each one as if it were <code>*:rw</code>:</p>
 <ul>
 <li><code>system:cron_jobs:rw</code> adds a crontab line, and crond runs its command as root.</li>
 <li><code>system:authorized_keys:rw</code> adds an SSH key that logs in as root.</li>
 <li><code>system:password:rw</code> sets the root password.</li>
 <li><code>packages:installed:rw</code> installs a package, and its install script runs as root.</li>
+<li><code>uhttpd:instances:rw</code> sets the document root and the CGI, Lua and ucode prefixes of an
+  instance, so it chooses which programs uhttpd runs as root and which files it serves.</li>
+<li><code>dhcp:odhcpd:rw</code> sets <code>leasetrigger</code>, a program that odhcpd runs as root on each lease change.</li>
+<li><code>dhcp:dnsmasq:rw</code> sets <code>leasefile</code>, a file that dnsmasq opens as root and rewrites with its
+  leases.</li>
 </ul>
 <p>The list is not complete: several uci options name a script that a daemon runs as root.
 A parent scope includes them, so <code>system:rw</code> grants the first three. Deepest match wins,
@@ -189,6 +201,18 @@ so <code>system:rw</code> with <code>system:cron_jobs:ro</code> keeps the system
 <p>One read scope deserves the same care. <code>system:cron_jobs:ro</code>, and every scope above it up
 to <code>*:ro</code>, returns each root crontab command in full, and a command can carry a credential.
 Keep secrets in a 0600 file that the command reads, rather than on the crontab line.</p>
+<h3 id="values-that-a-daemon-reads-later">Values that a daemon reads later</h3>
+<p>An init script copies some stored values into a daemon's config file or into a shell command
+without quoting, and root reads the result. In the curated values that an audit for 3.2.0 found,
+uapi refuses the characters that end the line or the argument, so that a value cannot add a
+directive, a command or a command argument. The check runs when a write goes through uapi, so a
+value that LuCI, <code>uci</code> or another writer stored stays until a write replaces it.</p>
+<p><code>/raw/</code> checks a value only for what uci can store, never for what a daemon reads.
+<code>raw:&lt;package&gt;:rw</code> with a domain scope of that package counts as a root scope for each package
+that a root daemon or script reads.</p>
+<p>uapi checks the dnsmasq config after a reload with <code>dnsmasq --test</code>, as root and outside the jail
+that procd gives dnsmasq, so a <code>conf-script</code> in that config runs there too. Only <code>raw:dhcp:rw</code> with
+a domain scope of <code>dhcp</code>, a root scope already, can write such a line.</p>
 <h3 id="audit-consequence">Audit consequence</h3>
 <p>The token <em>name</em> is logged on every audit line. Tokens should be named for
 their owner (<code>ci-bot</code>, <code>terraform-prod</code>, <code>alice-laptop</code>) so the audit log
@@ -251,7 +275,7 @@ useless and forces a per-token bruteforce; the token's own 128 bits make
 that intractable.</p>
 <h2 id="rate-limit-guarantees-and-non-guarantees">Rate limit guarantees (and non-guarantees)</h2>
 <ul>
-<li>The token bucket is per-token, file-backed at <code>/tmp/uapi-ratelimit/</code>.</li>
+<li>The token bucket is per-token, file-backed at <code>/var/run/uapi-ratelimit/</code>.</li>
 <li>Under heavy concurrent load against the same token, two forks may race
   the read-modify-write and one increment may be lost. The worst case is
   one request's worth of bucket drift, bounded by the burst size.</li>
@@ -315,8 +339,8 @@ are recorded choices rather than defects.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/security.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/security.md">repository</a>, never here.
+      Rendered from <code>docs/security.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/security.md">repository</a>, never here.
     </p>
   </div>
 </footer>

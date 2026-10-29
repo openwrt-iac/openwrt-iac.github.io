@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Migrating from uapi v2 to v3 - uapi 3.1.0 docs</title>
+<title>Migrating from uapi v2 to v3 - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Migrating from uapi v2 to v3</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Migrating from uapi v2 to v3</p>
   </div>
 </header>
 
@@ -35,7 +35,7 @@ one, so no manual uci edit is needed.</p>
 <li>Change your base URL from <code>/api/v2</code> to <code>/api/v3</code></li>
 <li>Regenerate any typed client. Model names change: every resource now has a separate
    <code>&lt;Name&gt;Request</code> and <code>&lt;Name&gt;Response</code> schema</li>
-<li>Verify: <code>GET /api/v3/healthz</code> returns <code>{"status":"ok","version":"3.0.0",...}</code></li>
+<li>Verify: <code>GET /api/v3/healthz</code> returns <code>{"status":"ok","version":"3.x.y",...}</code>, with the installed 3.x version</li>
 </ol>
 <h2 id="removed-request-fields-are-rejected-breaking">Removed request fields are rejected (Breaking)</h2>
 <p>A request naming a field the resource does not declare answers <code>422</code> with field code
@@ -200,8 +200,8 @@ returns another.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/migration-v2-to-v3.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/migration-v2-to-v3.md">repository</a>, never here.
+      Rendered from <code>docs/migration-v2-to-v3.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/migration-v2-to-v3.md">repository</a>, never here.
     </p>
   </div>
 </footer>

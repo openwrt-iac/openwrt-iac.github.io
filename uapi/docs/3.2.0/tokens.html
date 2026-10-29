@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tokens and scopes - uapi 3.1.0 docs</title>
+<title>Tokens and scopes - uapi 3.2.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.1.0 / Tokens and scopes</p>
+       <a href="/uapi/docs/">docs</a> / 3.2.0 / Tokens and scopes</p>
   </div>
 </header>
 
@@ -41,6 +41,7 @@ authorized against a hierarchical scope tree.</p>
 uapi-token show &lt;name&gt;      # detailed view (scopes, expiry, cidrs, last_used_at/ip; no secret)
 uapi-token revoke &lt;name&gt;    # delete a token
 </code></pre>
+<p><code>uapi-token create</code> and <code>revoke</code> take the locks that an HTTP write of the token store takes, the global lock shared and the lock of the <code>uapi</code> package exclusive, so that a write of the CLI and one of the HTTP path to <code>/etc/config/uapi</code> cannot lose each other. An HTTP write holds these locks for milliseconds, and the CLI waits up to 10 s for them. A non-uci write, such as an <code>apk</code> run through <code>/packages/installed</code>, can hold the global lock for longer. When a lock is still held after 10 s, the command names it and exits 75 (<code>EX_TEMPFAIL</code>), having written nothing, so a retry is safe.</p>
 <h2 id="creating-tokens-http">Creating tokens (HTTP)</h2>
 <p>A token holding <code>uapi:tokens:rw</code> (or <code>*:rw</code>) can mint other tokens over the
 wire:</p>
@@ -57,8 +58,11 @@ wire:</p>
 <p><code>allowed_cidrs</code> takes prefixes of either family, and a list may mix them. A caller is matched
 against entries of its own family only, so <code>0.0.0.0/0</code> does not admit an IPv6 caller and <code>::/0</code>
 does not admit an IPv4 one: a dual-stack router that means "any" has to say both. A caller
-arriving as an IPv4-mapped IPv6 address is matched against the IPv4 entries.</p>
-<p>The requested scopes must be a strict subset of the caller's. Escalation
+arriving as an IPv4-mapped IPv6 address is matched against the IPv4 entries. An IPv6 prefix length
+is 1 to 3 digits: an entry such as <code>fd00::/0x40</code>, which 3.1 read as <code>/0</code>, is refused at mint time,
+and a stored one admits no caller. The validation sweep does not cover tokens, so
+<code>uapi-token list</code> is where a stored entry shows.</p>
+<p>The caller's scopes must cover the requested scopes, equal or narrower. Escalation
 returns <code>403 scope_escalation_blocked</code>. The same request with a name
 that's already in use returns <code>409 conflict</code>.</p>
 <pre><code class="language-sh">curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v3/tokens
@@ -346,8 +350,8 @@ backdoor around carefully-crafted curated scopes.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/tokens.md</code> at tag <code>v3.1.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.1.0/docs/tokens.md">repository</a>, never here.
+      Rendered from <code>docs/tokens.md</code> at tag <code>v3.2.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/tokens.md">repository</a>, never here.
     </p>
   </div>
 </footer>
