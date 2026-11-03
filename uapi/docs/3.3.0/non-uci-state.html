@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Non-uci state: what uapi covers and what it doesn&#x27;t - uapi 3.2.0 docs</title>
+<title>Non-uci state: what uapi covers and what it doesn&#x27;t - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / Non-uci state: what uapi covers and what it doesn&#x27;t</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / Non-uci state: what uapi covers and what it doesn&#x27;t</p>
   </div>
 </header>
 
@@ -64,6 +64,13 @@
 <td>none (read-only)</td>
 <td>n/a</td>
 <td>odhcpd IPv6 leases</td>
+</tr>
+<tr>
+<td><code>network/wireguard_kernel_peers</code></td>
+<td><code>wg show &lt;iface&gt; dump</code> (parse)</td>
+<td>none (read-only)</td>
+<td>n/a</td>
+<td>kernel wg peers that no uci section claims</td>
 </tr>
 <tr>
 <td><code>system/password</code></td>
@@ -122,6 +129,13 @@
 <li><strong>Format.</strong> Best-effort parser, one entry per assigned address: <code>&lt;duid&gt; &lt;iaid&gt; &lt;hostname&gt; &lt;expires_at&gt; &lt;interface&gt; &lt;IA_NA|IA_PD&gt; &lt;ip&gt;[/&lt;prefixlen&gt;] [&lt;ip2&gt; ...]</code>. Lines that don't match this shape are silently skipped. odhcpd's statefile format varies across versions; parser failure on a single line never breaks the read path for the rest.</li>
 <li><strong>Why not uci.</strong> Same as <code>dhcp/leases</code>; runtime state.</li>
 </ul>
+<h3 id="networkwireguard_kernel_peers-read-only"><code>network/wireguard_kernel_peers</code> (read-only)</h3>
+<ul>
+<li><strong>Source of truth.</strong> The kernel, read with one <code>wg show &lt;interface&gt; dump</code> per up interface whose uci section has proto=wireguard. The dump is cached on the connection for the request, so a read of <code>network/wireguard_peers</code> and a read of this collection in one request share it. A dump in a shape that uapi does not read, and an interface that netifd does not report up, list nothing, as the <code>runtime</code> of a peer answers <code>{}</code> for both: a failed read never looks like an empty kernel.</li>
+<li><strong>Lock.</strong> None; reads only. The <code>wg show</code> runs outside every transaction, as the <code>runtime</code> read does.</li>
+<li><strong>Claim check.</strong> A peer is listed when no section of <code>wireguard_&lt;interface&gt;</code> claims its key. The key is read as wg reads the stored <code>public_key</code>, the later <code>PublicKey=</code> lines of one value included. A disabled section claims too: the <code>runtime</code> of a disabled section already reports a peer that the kernel holds under its key, so listing it would report the drift twice.</li>
+<li><strong>Why not uci.</strong> A peer that only the kernel holds is runtime state: a hand <code>wg set</code> added it, or a failed apply left it behind. Before this collection it was the only wireguard state that no read showed, because the <code>runtime</code> of <code>network/wireguard_peers</code> annotates each section and lists nothing on its own.</li>
+</ul>
 <h3 id="systempassword-write-only"><code>system/password</code> (write-only)</h3>
 <ul>
 <li><strong>Source of truth.</strong> <code>/etc/shadow</code>, via <code>passwd(1)</code>.</li>
@@ -148,7 +162,7 @@
 <li><strong>Lock.</strong> <code>transaction.with_lock</code> for writes. Reads are lock-free.</li>
 <li><strong>Mechanism.</strong> The write reads the file, adds or removes its own line, and puts the result in place with the same 0600 temp-file-and-rename as <code>authorized_keys</code>. Every other line stays byte for byte: entries from packages, comments, and <code>MAILTO=</code>, <code>SHELL=</code> and <code>PATH=</code> lines. An appended entry goes at the end, so an environment line earlier in the file applies to it. A crontab that exists but cannot be read fails the request with <code>500</code>, because treating it as empty would let the write replace every line in it.</li>
 <li><strong>Line continuation.</strong> crond joins a line that ends in <code>\</code> with the next one, and drops the backslash, before it looks for <code>#</code>. Measured on the device: <code>touch /tmp/c1 \</code> followed by <code>/tmp/c2</code> ran <code>touch /tmp/c1 /tmp/c2</code>, and a comment that ends in <code>\</code> hid the entry below it. uapi reads the file in the same groups. A delete removes every physical line of its entry, and an append after a trailing backslash first adds a blank line, which ends the continuation without changing what crond reads for the line before.</li>
-<li><strong>Reload.</strong> <code>/etc/init.d/cron reload</code>. The init script registers each crontab with procd as a watched file, so the reload restarts crond only when the content changed. It is also what starts crond on a stock image: there is no crontab there, and the init script does not start crond while <code>/etc/crontabs/</code> is empty. A failed reload puts the old file back and reloads again, and the request answers <code>reload_failed_restored</code> or <code>reload_failed_unrecovered</code>, as a curated write does. Removing the last entry leaves an empty file, so crond keeps running with nothing to do.</li>
+<li><strong>Reload.</strong> <code>/etc/init.d/cron reload</code>. The init script registers each crontab with procd as a watched file, so the reload restarts crond only when the content changed. It is also what starts crond on a stock image: there is no crontab there, and the init script does not start crond while <code>/etc/crontabs/</code> is empty. A failed reload puts the old file back and reloads again, and the request answers <code>reload_failed_restored</code> or <code>reload_failed_unrecovered</code>, as a curated write does. uapi waits for the reload and the one of the restore for 20 s in all, as for a curated write, and does not kill them: a reload still running then keeps the new file, and the write answers 200 with <code>X-Reload-Status: unverified</code>, which a cron write carries in that case only, a syslog warning <code>uapi-cron-reload-unverified</code> whose <code>note</code> names the reload, and <code>crond_running</code> as procd reports it at that moment. Removing the last entry leaves an empty file, so crond keeps running with nothing to do.</li>
 <li><strong>Effect.</strong> <code>runtime.crond_running</code> asks procd whether crond runs, on every read and after every write, delete included. The reload exit status cannot tell: with an invalid <code>system.cronloglevel</code> the init script prints "validation failed", exits 0, and procd stops crond. A write in that state answers 200 with <code>crond_running: false</code>. uapi does not know whether a job ran, and does not claim to.</li>
 <li><strong>Reads list what crond runs.</strong> A line is parsed the way busybox crond reads it on OpenWrt: continuations are joined, <code>#</code> ends the line wherever it appears, environment lines and lines short of five fields plus a command are skipped, and field spacing collapses. A line from another writer therefore shows up as crond sees it, which is not always how it looks. Where its schedule is one crond misreads, such as minute <code>75</code> or weekday <code>7</code>, the entry says so with <code>runtime.runs_as_written: false</code>.</li>
 <li><strong>Validation.</strong> Writes accept only what crond runs as written, and refuse an undeclared body field with <code>unknown_field</code>. busybox crond does not refuse a bad field: it logs a parse error and keeps the line with a half-filled schedule, so minute <code>75</code> runs every minute and weekday <code>7</code> runs every day. The schedule is five fields separated by single spaces, each a list of values, ranges (wrapping ones such as <code>22-2</code> included) and <code>*</code>, with a <code>/step</code> after <code>*</code> or a range. Ranges: minute 0-59, hour 0-23, day 1-31, month 1-12 or <code>jan</code>-<code>dec</code>, weekday 0-6 or <code>sun</code>-<code>sat</code>. Refused, each for a reason crond gives:</li>
@@ -207,8 +221,8 @@
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/non-uci-state.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/non-uci-state.md">repository</a>, never here.
+      Rendered from <code>docs/non-uci-state.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/non-uci-state.md">repository</a>, never here.
     </p>
   </div>
 </footer>

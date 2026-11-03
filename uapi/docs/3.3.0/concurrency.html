@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Concurrency rules for contributors - uapi 3.2.0 docs</title>
+<title>Concurrency rules for contributors - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / Concurrency rules for contributors</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / Concurrency rules for contributors</p>
   </div>
 </header>
 
@@ -34,7 +34,7 @@
 <li><strong>Compute static tables at startup.</strong> <code>RESOURCES</code>, <code>SINGLETONS</code>, <code>KNOWN_PATHS</code>, all the resource module return-objects are built once and treated as read-only.</li>
 <li><strong>Read uci on every request.</strong> uci reads are millisecond-scale and the request volume is low. There is no benefit to caching uci state in memory across requests, and the integration test for the parent-fork model would catch you if you tried.</li>
 <li><strong>Acquire flocks before writing.</strong> Use <code>transaction.transaction()</code> for single-package uci writes; it takes SH on the global lock + EX on the per-package lock. Use <code>transaction.with_lock()</code> for non-uci writes; it takes EX on the global. Use <code>transaction.multi_transaction()</code> for cross-package atomic writes (<code>/batch</code>).</li>
-<li><strong>Use file-backed state for cross-request data.</strong> The token-bucket rate limiter writes to <code>/var/run/uapi-ratelimit/&lt;token&gt;.txt</code>. The idempotency cache writes to <code>/var/run/uapi-idempotency/</code>. File IO + atomic rename + flock is the cross-fork channel.</li>
+<li><strong>Use file-backed state for cross-request data.</strong> The token-bucket rate limiter writes to <code>/var/run/uapi-ratelimit/&lt;token&gt;.txt</code>, where <code>&lt;token&gt;</code> is the token name, or its sha256 for a name longer than 63 characters. The idempotency cache writes to <code>/var/run/uapi-idempotency/</code>. File IO + atomic rename + flock is the cross-fork channel.</li>
 </ul>
 <h2 id="what-you-cannot-do">What you cannot do</h2>
 <h3 id="no-module-level-mutable-state-for-caching">No module-level mutable state for caching</h3>
@@ -49,6 +49,7 @@ function get_tokens() {
 <p>Use <code>conn.call()</code> only. Async ubus does not buy you any concurrency you don't already have from forking, and the synchronous failure path is easier to reason about. No lint enforces this; it is a code-review rule.</p>
 <h3 id="no-background-work-after-the-response">No "background" work after the response</h3>
 <p>The fork exits as soon as <code>handle_request</code> returns. There is no <code>setTimeout</code>, no thread, no detached task. If you need work to outlive the request, write to a file the next request will pick up, or rely on an external cron/timer.</p>
+<p>One exception exists. uapi runs the init scripts of a write in a detached shell and waits for them for 20 s, so a reload that runs longer outlives its request, which answers <code>X-Reload-Status: unverified</code>. It then runs without the uapi locks. A procd service stays serialized by the lock that <code>procd_lock</code> of rc.common takes for it. An init script without <code>procd_lock</code> is serialized with the next write to its package only during those 20 s.</p>
 <h3 id="no-in-process-pubsub-event-bus">No in-process pubsub / event bus</h3>
 <p>Same reason as the cache: state does not survive <code>fork().exit()</code>.</p>
 <h2 id="lock-layout">Lock layout</h2>
@@ -79,8 +80,8 @@ function get_tokens() {
 </tr>
 <tr>
 <td><code>/var/lock/uapi.pkg.unbound.lock</code> (EX)</td>
-<td>also a uci transaction on <code>unbound_srv</code> or <code>unbound_ext</code></td>
-<td>serializes the writes that restart unbound, so that the stay-up check of one does not see the restart or the config of another</td>
+<td>also a uci transaction on <code>unbound_srv</code> or <code>unbound_ext</code>, and on <code>dhcp</code>, or on <code>system</code> but not through <code>system/timeservers</code>, while <code>/etc/init.d/unbound</code> exists, whether unbound runs or not</td>
+<td>serializes the writes that restart unbound, so that the stay-up check of one does not see the restart or the config of another. The writes that reload unbound only while procd holds a trigger for it take the lock before they ask procd, so that the restart of a write to unbound cannot fall between the answer and the commit. A restart that outlives its request, see above, is no longer covered</td>
 </tr>
 </tbody>
 </table>
@@ -150,8 +151,8 @@ upper-bound throughput is then the transaction's own latency
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/concurrency.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/concurrency.md">repository</a>, never here.
+      Rendered from <code>docs/concurrency.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/concurrency.md">repository</a>, never here.
     </p>
   </div>
 </footer>

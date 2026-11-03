@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi security model - uapi 3.2.0 docs</title>
+<title>uapi security model - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / uapi security model</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / uapi security model</p>
   </div>
 </header>
 
@@ -232,6 +232,10 @@ identifies the responsible party, not a hash.</p>
 <li><code>GET /schema/*</code>: per-resource JSON Schema (codegen input).</li>
 </ul>
 <p>All three still pass the TLS check; only the bearer requirement is waived. Plain HTTP from a non-loopback source still returns <code>403 tls_required</code> before the public-endpoint short-circuit runs.</p>
+<p>uapi reads and parses the body of a POST, PUT or PATCH before the bearer check, on every path. <code>json()</code> takes about 1.6 KB for each object or array, so 1 MiB of <code>[{},{},...]</code> took 560 MB. A body over 256 KiB, sent with a <code>Content-Length</code> or chunked, or a body with more than 2000 <code>{</code> and <code>[</code> characters, answers <code>413 payload_too_large</code> before the parse, which keeps the parse of a body without a token under about 13 MB (measured with ucode 2026.01.16 on x86_64). A <code>Content-Length</code> that uapi does not read as a whole number from 0 to 262144 answers 413 too, because uhttpd reads such a value in another way: on a 64-bit router it wraps a value of 2^32 or more. uhttpd hands a chunked body over de-chunked and with no <code>Content-Length</code>, and uapi reads it until uhttpd closes the pipe after the last chunk. uapi joins the parts of a body as it reads them, so a body that arrives a byte at a time takes about as much memory as one that arrives whole.</p>
+<p>uhttpd parses what the request process leaves unread as the next request on the connection. So before it answers, on every path and the public endpoints included, uapi reads and drops what is left of every body that uhttpd hands over. uhttpd does not hand over some bodies whole, and uapi cannot drop what follows them: uhttpd ends a chunked body at a chunk extension, parses a trailer after the last chunk as a new request, and reads a <code>Transfer-Encoding</code> value other than <code>chunked</code> in lower case, such as <code>Chunked</code>, as no body.</p>
+<p>A body has to arrive in full within 10 s of the start of the request process. uhttpd hands it over a blocking pipe, where a process that waits for a body that does not come holds one of the <code>max_requests</code> of uhttpd, 3 by default and shared with LuCI, until the script timeout of uhttpd, 60 s by default. uapi makes the pipe non-blocking with <code>ucode-mod-io</code>. So a POST, PUT or PATCH whose client declares a body and sends less, sends it too slowly, or does not send the last chunk of a chunked body, gets <code>400 bad_request</code> after about 10 s, before the bearer check, and syslog gets a <code>uapi-body-deadline</code> line (<code>docs/operations.md</code>). The drop of what is left of a body stops at the same deadline. So a request that answers without reading its body gets its normal answer 10 s after it started when that body does not arrive, and logs the same line: a 413, a POST to <code>/healthz</code>, or a GET or DELETE with a declared body. A DELETE has then already been applied. uapi checks the deadline when it finds the pipe empty, so that a drop after a write that took longer still reads a body that has arrived. A body that keeps arriving faster than uapi drops it is therefore bounded by its <code>Content-Length</code> or its last chunk and by the script timeout, not by the deadline. The deadline bounds each request, not how many a client opens one after another. Without <code>ucode-mod-io</code>, uapi reads a body from the blocking pipe with no deadline, and logs that once when uhttpd starts.</p>
+<p>uhttpd keeps the connection open after every answer of the handler, and nothing that uapi sends makes it close the connection. After a body that missed the deadline, uhttpd parses what the client sends next on the connection, the rest of that body included, as a new request, and answers it. For a client on its own connection this changes nothing that it could not do with a request of its own. It matters behind a reverse proxy that streams request bodies to uhttpd and reuses its connections to uhttpd for other clients: the rest of a late body would reach uhttpd as a request, and its answer would go to the request that the proxy sends next on that connection. Such a proxy should buffer each request body before it forwards it, as nginx does by default, or close a connection to uhttpd on which it did not finish sending a request.</p>
 <h2 id="tls-posture">TLS posture</h2>
 <ul>
 <li><code>uhttpd</code> serves both HTTP and HTTPS. <code>tls_check()</code> permits HTTP only
@@ -261,12 +265,18 @@ identifies the responsible party, not a hash.</p>
 </code></pre>
 <ul>
 <li>Cleartext token is shown exactly once at creation (<code>uapi-token create</code>
-  CLI or <code>POST /tokens</code> HTTP). Never logged.</li>
+  CLI or <code>POST /tokens</code> HTTP). Never logged. A <code>POST /tokens</code> that carries an
+  <code>Idempotency-Key</code> returns it again to a retry with the same key and body,
+  see <code>docs/tokens.md</code>.</li>
 <li>Salt is 64 random bits (16 hex chars); hash is <code>sha256(salt || ":" || token)</code>.</li>
-<li><code>/etc/config/uapi</code> is a conffile, preserved across upgrades and
-  removal.</li>
+<li><code>/etc/config/uapi</code> has mode 0600, which the install hook sets, and is no
+  file of the package, so apk keeps it across upgrades and removal.
+  sysupgrade keeps it because base-files of OpenWrt 25.12.5 lists all of
+  <code>/etc/config/</code> in its keep.d, and <code>/lib/upgrade/keep.d/uapi</code> names it
+  while the package is installed.</li>
 <li>last-used tracking is throttled to ~1 write/minute per token via a tmpfs
-  sentinel (<code>/var/run/uapi-token-update/&lt;token-id&gt;</code>); the wire response
+  sentinel (<code>/var/run/uapi-token-update/&lt;token-id&gt;</code>, or the sha256 of a
+  name longer than 63 characters); the wire response
   never depends on the audit write.</li>
 </ul>
 <p>The <code>salt</code>+<code>hash</code> design defends against an offline attacker who reads the
@@ -339,8 +349,8 @@ are recorded choices rather than defects.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/security.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/security.md">repository</a>, never here.
+      Rendered from <code>docs/security.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/security.md">repository</a>, never here.
     </p>
   </div>
 </footer>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ucode quirks that have bitten this project - uapi 3.2.0 docs</title>
+<title>ucode quirks that have bitten this project - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / ucode quirks that have bitten this project</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / ucode quirks that have bitten this project</p>
   </div>
 </header>
 
@@ -60,7 +60,7 @@ if (caught != null) die(caught);
 <h3 id="coerces-as-in-javascript"><code>==</code> coerces, as in JavaScript</h3>
 <p><code>false == ""</code> and <code>0 == ""</code> are true, while <code>false == null</code> and <code>0 == null</code> are false. A test for an empty string written <code>v == ""</code> therefore also matches <code>false</code> and <code>0</code>: in <code>network.interfaces</code> it let <code>sourcefilter: false</code> pass as an empty value. Write <code>v === ""</code> when <code>v</code> can be a boolean or a number.</p>
 <h3 id="match-and-json-stop-at-the-first-nul"><code>match()</code> and <code>json()</code> stop at the first NUL</h3>
-<p><code>match("rule\u0000 x", /^[!-~]+$/)</code> returns <code>[ "rule" ]</code>: an anchored pattern checks only the prefix and passes. uci takes C strings and then stores <code>rule</code>. <code>json()</code> also cuts an object key at its first NUL, so <code>{"k\u0000x": 1}</code> parses as <code>{ "k": 1 }</code>. <code>main.uc</code> therefore refuses the NUL escape in the request text (<code>values.json_has_nul</code>) before any handler runs.</p>
+<p><code>match("rule\u0000 x", /^[!-~]+$/)</code> returns <code>[ "rule" ]</code>: an anchored pattern checks only the prefix and passes. uci takes C strings and then stores <code>rule</code>. <code>json()</code> also cuts an object key at its first NUL, so <code>{"k\u0000x": 1}</code> parses as <code>{ "k": 1 }</code>. <code>main.uc</code> therefore refuses the NUL escape in the request text (<code>values.json_has_nul</code>) before any handler runs. <code>replace()</code> with a regex stops there too: <code>replace("AB\u0000 CD", /[[:space:]]/g, "")</code> returns <code>AB</code>. <code>wg.uc</code> relies on it to end a line of a WireGuard config at a NUL byte, as wg does.</p>
 <h3 id="const-is-real"><code>const</code> is real</h3>
 <p><code>const X = ...</code> is parsed and enforced. Top-level data tables in this repo are mostly <code>const</code>.</p>
 <h3 id="fs-calls-return-null-on-failure-and-do-not-throw"><code>fs</code> calls return null on failure and do not throw</h3>
@@ -112,7 +112,7 @@ netifd's is the strict one:</p>
 </thead>
 <tbody>
 <tr>
-<td>netifd C, via uci's blob converter</td>
+<td>netifd C and odhcpd, via uci's blob converter</td>
 <td><code>1</code>, <code>true</code></td>
 <td><code>0</code>, <code>false</code></td>
 <td>option <strong>dropped</strong>, daemon default applies</td>
@@ -147,6 +147,13 @@ netifd's is the strict one:</p>
 <td><code>strict_bool</code></td>
 </tr>
 <tr>
+<td>numeric test, <code>[ "$x" -gt 0 ]</code></td>
+<td>a number above 0, whitespace around it included</td>
+<td><code>0</code>, a number below it, and any word, <code>true</code> included</td>
+<td>there is no else</td>
+<td>see below</td>
+</tr>
+<tr>
 <td>libvalidate <code>:bool:</code> via <code>uci_validate_section</code></td>
 <td>unverified</td>
 <td>unverified</td>
@@ -157,6 +164,15 @@ netifd's is the strict one:</p>
 </table>
 <p>So <code>option auto 'no'</code> on an interface does not disable autostart: netifd drops
 the value and uses its own <code>true</code>.</p>
+<p>When two daemons read one option with different rows, read true only for a value
+that both take as true. <code>dhcp/odhcpd.maindhcp</code> goes to odhcpd through the blob
+converter and to dnsmasq.init through <code>[ "$x" -gt 0 ]</code>, so only <code>1</code> reads true,
+with <code>strict_bool</code>. odhcpd serves DHCPv4 for <code>true</code> while dnsmasq does too, and
+dnsmasq stops for <code>2</code>. odhcpd then keeps the value that it had, because the
+converter drops <code>2</code> and a reload does not reset <code>main_dhcpv4</code>, so it serves only
+if it did before. A write that sends the field stores <code>1</code> or <code>0</code> even when the
+read already gives that value (<code>rewrite_when_named</code> of the module), so that both
+daemons agree.</p>
 <p><strong>Pick the row, do not pick a default.</strong> This table previously said "<code>platform_bool</code>
 for netifd-owned fields and <code>normalize_bool</code> for the rest", and that "the rest"
 produced a bug in roughly forty places at once. The worst was <code>disabled</code> on a
@@ -189,7 +205,7 @@ replaced the operator's value with <code>"1"</code>.</p>
 </thead>
 <tbody>
 <tr>
-<td>INT32: interface <code>metric</code>, <code>ip6assign</code>, <code>ip6weight</code> and <code>mtu</code>, route <code>metric</code> and <code>mtu</code>, rule <code>priority</code> and <code>goto</code>, device <code>mtu</code>, bridge-vlan <code>vlan</code></td>
+<td>INT32: interface <code>metric</code>, <code>ip6assign</code>, <code>ip6weight</code> and <code>mtu</code>, route <code>metric</code> and <code>mtu</code>, rule <code>priority</code>, <code>goto</code>, <code>tos</code> and <code>suppress_prefixlength</code>, device <code>mtu</code>, bridge-vlan <code>vlan</code></td>
 <td><code>strtol(v, &amp;end, 0)</code> with nothing left over: hex after <code>0x</code>, octal after <code>0</code></td>
 <td><code>0x10</code> is 16, <code>010</code> is 8, and <code>16</code> or <code>08</code> drop the option</td>
 <td><code>netifd_int</code></td>
@@ -199,6 +215,12 @@ replaced the operator's value with <code>"1"</code>.</p>
 <td>a list as it is, and a scalar split on spaces and tabs</td>
 <td><code>option dns '192.0.2.1 192.0.2.2'</code> is two servers</td>
 <td><code>as_word_list_or_null</code></td>
+</tr>
+<tr>
+<td>STRING: rule <code>uidrange</code>, <code>ipproto</code>, <code>sport</code> and <code>dport</code></td>
+<td>the text as uci holds it, and nothing for a list</td>
+<td><code>list sport '80'</code> sets no port</td>
+<td><code>netifd_string</code></td>
 </tr>
 <tr>
 <td>Routing table: route <code>table</code>, rule <code>lookup</code></td>
@@ -218,22 +240,43 @@ config, where <code>atoi()</code> reads NaN as 0. <code>ucode_int</code> reads <
 wrong for netifd. <code>netifd_int</code> reads <code>""</code> and a value past int32 as null, where
 blob.c gives 0 and a truncated number that differs between 32- and 64-bit targets.
 A proto script that loops <code>for a in ${addresses}</code> splits a scalar the same way as
-an ARRAY option. A shell reader that goes through <code>config_get</code>, as <code>wireguard.sh</code>
-does for a peer's <code>allowed_ips</code>, also joins a list with spaces, so it splits a
-list entry that holds several words, where <code>as_word_list_or_null</code> keeps that
-entry whole and validation then refuses it. <code>config_get_words</code> reads such a value
-as the shell gets it, split at a newline too, and <code>lldpd/config.interface</code> and
-<code>dhcp/hosts.macs</code> use it, where LuCI's <code>L.toArray</code> keeps the entry whole. A
-peer's <code>allowed_ips</code> still reads with <code>as_word_list_or_null</code>. <code>config_get_bool</code>
-gets a list joined the same way, so <code>list disabled '1'</code> disables a wireguard
-peer: read such a value with <code>config_get</code> before <code>shell_bool</code>.</p>
+an ARRAY option. A shell reader that goes through <code>config_get</code> also joins a list
+with spaces, so it splits a list entry that holds several words, where
+<code>as_word_list_or_null</code> keeps that entry whole. <code>config_get_words</code> reads such a
+value as the shell gets it, split at a tab and a newline too, and
+<code>lldpd/config.interface</code>, <code>dhcp/hosts.macs</code> and <code>dhcp/hosts.tag</code> use it, where
+LuCI's <code>L.toArray</code> keeps the entry whole. <code>config_get</code> leaves out an empty list
+entry, as <code>append</code> adds nothing for it. <code>wireguard.sh</code> does not split a peer's
+<code>allowed_ips</code> for wg: it turns each space into a comma, printf %b expands the
+line, and wg cuts it at a NUL byte and at <code>#</code>, splits it at commas and strips the
+rest of the whitespace, so <code>\054</code> separates two prefixes, a tab joins two
+prefixes into one entry, and a second space adds an empty one, which wg refuses.
+<code>wg.allowed_ips</code> reads it that way, and keeps the whitespace in an entry so that
+a tab shows. The routes of <code>route_allowed_ips</code> go to each word of the shell's
+split, which printf %b never sees, so the route side reads with
+<code>config_get_words</code>, and takes the address before the first <code>/</code> of a word and the
+length after its last, as the <code>case</code> of wireguard.sh does, and reads the length
+as netifd does, with strtoul in base 0 or as an IPv4 mask. <code>config_get_bool</code> gets
+a list joined the same way, so <code>list disabled '1'</code> disables a wireguard peer: read
+such a value with <code>config_get</code> before <code>shell_bool</code>. <code>config_list_foreach</code> is the
+opposite case: it walks the entries of a list and skips an option, so
+<code>dhcp/hosts.match_tag</code> and the <code>server</code> and <code>address</code> of <code>dhcp/dnsmasq</code> read an
+option as null.</p>
 <p>The reverse also holds: blob.c drops a <code>list</code> given to an attribute that is not an ARRAY, so
 6rd, map and 464xlat, which declare <code>ip6prefix</code> as a string, lose a listed value. That is why
 uapi writes one <code>ip6prefix</code> as a scalar and only several as a list.</p>
+<p>blob.c splits an option at spaces and tabs only, and passes a list entry whole, a
+newline included. An option without a word, such as one of spaces, is an empty
+ARRAY, which is not the same as no option. odhcpd sets no RA flag for an empty
+<code>ra_flags</code>, <code>other-config</code> for an absent one, and stops at the first word that is
+no flag name, keeping the flags before it, so <code>dhcp/servers</code> reads the flags that
+it sets, and <code>["none"]</code> when there are none.</p>
 <p>busybox <code>ip</code> reports an id above 255 in <code>/etc/iproute2/rt_tables</code> as "database
 tables is corrupted", and <code>ip route show table 4255</code> answers "invalid argument",
 while netifd resolves such a name normally. A test that reads tables through <code>ip</code>
 needs an id of 255 or less.</p>
+<h3 id="busybox-ash-closes-a-high-descriptor-in-the-calling-shell-for-cmd-n-">busybox ash closes a high descriptor in the calling shell for <code>cmd N&gt;&amp;-</code></h3>
+<p>With busybox 1.38.0, <code>cmd &gt;&amp;12 2&gt;&amp;1 12&gt;&amp;- 13&gt;&amp;-</code> left descriptor 13 closed in the shell that ran <code>cmd</code>, so a later <code>echo 0 &gt;&amp;13</code> wrote nothing and reported no error. With descriptors below 10, or with only 13 closed, it did not. The busybox of OpenWrt 25.12.5 does the same. <code>default_reload()</code> closes the descriptors with <code>exec</code> in a subshell that then runs the script, <code>(exec 12&gt;&amp;- 13&gt;&amp;-; exec &lt;script&gt; reload) &gt;&amp;12 2&gt;&amp;1</code>, so that nothing that the calling shell needs passes through such a redirection.</p>
 <h3 id="real-ubus-and-uci-modules-are-so-packages">Real <code>ubus</code> and <code>uci</code> modules are <code>.so</code> packages</h3>
 <p>They live in the default <code>REQUIRE_SEARCH_PATH</code> ahead of any project paths. Naming a local lib <code>ubus.uc</code> shadows nothing because the <code>.so</code> wins. uapi calls its abstraction <code>bus.uc</code> to avoid the collision.</p>
 <h2 id="when-you-find-a-new-one">When you find a new one</h2>
@@ -244,8 +287,8 @@ needs an id of 255 or less.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/ucode-quirks.md">repository</a>, never here.
+      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/ucode-quirks.md">repository</a>, never here.
     </p>
   </div>
 </footer>

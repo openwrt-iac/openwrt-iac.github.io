@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Roadmap - uapi 3.2.0 docs</title>
+<title>Roadmap - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / Roadmap</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / Roadmap</p>
   </div>
 </header>
 
@@ -354,6 +354,60 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   rate-limit buckets, the error ring and the last-used markers of the tokens keep their files
   under <code>/var/run</code>, in directories of mode 0700 with files of mode 0600 (#266, #270).</li>
 </ul>
+<h2 id="shipped-in-330">Shipped in 3.3.0</h2>
+<ul>
+<li>
+<p><strong>A read of <code>network/wireguard_peers</code> reports the peer in the kernel.</strong> Its <code>runtime</code> comes
+  from one <code>wg show &lt;iface&gt; dump</code> for each interface: whether the kernel holds a peer under the
+  key that wg reads from the stored one, the endpoint, allowed IPs and keepalive of the kernel
+  beside the fields of uci, and the handshake and byte counters. A peer that <code>wg</code> changed by
+  hand, or that a failed apply left behind, read as uci holds it, and since a PUT that changes
+  nothing no longer sets the peer again, nothing reported the drift. A read now reports it, and
+  uapi corrects nothing (<a href="https://github.com/openwrt-iac/uapi/issues/281">#281</a>).</p>
+</li>
+<li>
+<p><strong><code>GET /network/wireguard_kernel_peers</code> lists the peer that no section claims.</strong> The <code>runtime</code>
+  annotates each section that uci holds, so a peer that only the kernel holds, one that a hand
+  <code>wg set</code> added or a failed apply left behind, was in no read at all. The collection is the
+  second half: one dump per up interface, the claim check keyed as wg reads the stored key,
+  read-only and lock-free, with the stable content id of a crontab entry. The kernel apply and
+  the restore also refuse a stored <code>allowed_ips</code> entry marked <code>+</code> or <code>-</code>, which wg takes as the
+  marker of an incremental update, so a restore no longer adds to what a failed apply left in the
+  kernel and no longer answers <code>restored</code> for a peer it could not put back
+  (<a href="https://github.com/openwrt-iac/uapi/issues/281">#281</a>).</p>
+</li>
+<li>
+<p><strong>The request body is read whole, bounded and on a deadline.</strong> A chunked body reached no
+  handler, a body that arrived in parts was cut, and a client that declared a body and never
+  finished it held its request process until the script timeout of uhttpd, in one of the three
+  slots it shares with LuCI, with no token. A body is now read to its end however it arrives, a
+  <code>Content-Length</code> that uapi does not read as a whole number from 0 to 256 KiB answers 413 before
+  any read, a body that has not arrived in full 10 s after the request answers 400 on a
+  non-blocking stdin that the optional <code>ucode-mod-io</code> provides, and every path drains what is left
+  of a body before it answers, so the next request on the connection works.</p>
+</li>
+<li>
+<p><strong>The reloads of a write follow procd, and the answer says what ran.</strong> A <code>dhcp</code> or <code>system</code>
+  write reloads dnsmasq, odhcpd and unbound only while procd holds a config trigger for each, as a
+  LuCI save does, so a daemon that the operator stopped stays stopped and unbound is left alone
+  at boot until its interface trigger starts it. uapi waits for the reloads of a request for 20 s
+  in all and answers <code>X-Reload-Status: unverified</code> for one still running instead of a 502 at
+  60 s. The restore after a failed reload keeps what LuCI or a shell committed to the package
+  during the request and answers <code>reload_failed_unrecovered</code> with the package named, and a PUT
+  that changes nothing commits, reloads and sets no peer again.</p>
+</li>
+<li>
+<p><strong><code>network/rules</code> models the match options that netifd reads</strong>, <code>suppress_prefixlength</code>, <code>tos</code>,
+  <code>uidrange</code>, <code>ipproto</code>, <code>sport</code> and <code>dport</code>, which a PUT removed with every option it did not
+  model, and takes a rule without a selector, so the rule that keeps the main table for every
+  destination but the default route can be written through the API.</p>
+</li>
+<li>
+<p><strong>A pull request that changes what goes into the APK builds it and runs its smoke test with the
+  upgrades from 3.2.0</strong>, which only a release tag ran, and the ruleset of <code>main</code> requires the
+  <code>package</code> check with the other four.</p>
+</li>
+</ul>
 <h2 id="features-additive-future-minor-bumps-in-v3x">Features (additive, future minor bumps in v3.x)</h2>
 <ul>
 <li><strong>Upstream: one unresolvable peer endpoint should not take a tunnel down.</strong>
@@ -390,6 +444,27 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   As of 2026-10-28, OpenWrt <code>main</code> pins a netifd from 2026-10-28, which carries it, but
   <code>openwrt-25.12</code> still pins 2026-02-26, and so does 25.12.6. The unit test that pins the
   per-type difference is what will say when the widening is right.</p>
+</li>
+<li>
+<p><strong>Upstream: uhttpd serves its request queue last-in first-out.</strong> When every
+  <code>max_requests</code> handler slot is taken, uhttpd queues a new request and serves the
+  newest queued one first, so a client that keeps the slots busy keeps the earliest
+  queued request waiting the longest, and it needs no token to do so. uapi's 10 s body
+  deadline frees its own slots, but the order of the queue is uhttpd's and no ucode
+  handler can change it. Found while measuring the body reads of
+  <a href="https://github.com/openwrt-iac/uapi/pull/296">#296</a> and
+  <a href="https://github.com/openwrt-iac/uapi/pull/299">#299</a> on uhttpd 2025.10.03. A fix
+  belongs to uhttpd, and this is recorded so the question is not re-opened as uapi work.</p>
+</li>
+<li>
+<p><strong>Upstream: luci-base reads a request body with no deadline.</strong> LuCI's ucode runtime
+  reads a POST body with <code>uhttpd.recv</code> on the same blocking pipe as uapi and sets no
+  deadline (<code>modules/luci-base/ucode/uhttpd.uc</code>, <code>luci.http</code>), so a body that stalls
+  holds one of the shared <code>max_requests</code> slots until the script timeout of uhttpd, the
+  login included. uapi bounds its own bodies
+  (<a href="https://github.com/openwrt-iac/uapi/pull/299">#299</a>). LuCI's requests share the same
+  slots and keep their behavior. A fix belongs to luci-base, and this is recorded so the
+  question is not re-opened as uapi work.</p>
 </li>
 <li>
 <p><strong>Standalone confirm arm over HTTP (<code>POST /confirm</code>).</strong> The per-write
@@ -492,8 +567,9 @@ is unresolvable.</p>
   answers nothing. The reload that the request started runs on, and since the lock fds
   close on exec the kill also releases the lock, so the next write can commit and reload
   beside it. <code>multi_transaction()</code> and the crontab apply in <code>crontab.uc</code> have the same
-  shape. The steps after the commit are not short: each reload, the stay-up watch, which
-  waits up to 2 s and again on a restore, and the kernel apply.
+  shape. The steps after the commit are not short: the reloads, which uapi waits for up to
+  20 s in all, the stay-up watch, which waits up to 2 s and again on a restore, and the kernel
+  apply.
   Nothing inside the request can close this, so it needs a design change. The shapes seen
   so far, none chosen:</p>
 </li>
@@ -511,11 +587,41 @@ is unresolvable.</p>
   The details are under Open findings in <code>docs/lock-state-audit.md</code>.</p>
 </li>
 <li>
+<p><strong>The restore after a failed reload leaves a package that another writer committed to during
+  the reload, and the operator repairs it.</strong> LuCI and a shell take no uapi lock, so they can commit
+  to the package while its daemons reload, into the file that the request committed. The restore
+  wrote back the snapshot from before both, so it undid that commit too. It now compares the file
+  with what the request committed, under libuci's flock, leaves a file that differs as it is, and
+  answers <code>reload_failed_unrecovered</code> with the package named in <code>restore_error</code>. The package then
+  keeps the write that the daemon refused beside the other commit. A commit that libuci renames
+  between the comparison and the rename of the restore is still undone, and so is one between the
+  rename of the request's own commit and the read of the file that follows it. Two ways to recover
+  such a package without the operator were not chosen:</p>
+</li>
+<li>Undo only the writes of the request: load the file as it is, set back what the request wrote
+    and commit through libuci. That needs a rule for an option that both wrote, puts a section that
+    a DELETE removed back at the end of the package with a new name when it was anonymous, drops
+    the comments of the file, and gives up the check of its own write that the restore makes,
+    because libuci does not check its write.</li>
+<li>
+<p>Hold libuci's flock from the commit to the end of the restore: libuci's own load and commit in
+    the request would wait on that lock, LuCI would wait for the whole reload, and libuci releases
+    its flock before its rename anyway.</p>
+</li>
+<li>
 <p><strong>Reporting-surface consumption is the provider's.</strong> <code>X-Kernel-Status</code>,
   <code>management_path</code> and <code>?validate=1</code> are all emitted and documented here, and
   <code>terraform-provider-uapi</code> consumes none of them. That is the provider's call, not a gap
   in this repo, and it is recorded here only so the question is not re-opened as uapi
   work.</p>
+</li>
+<li>
+<p><strong>The idempotent retry of a POST that lost its answer is the provider's.</strong> uhttpd can
+  kill a request after its commit, which leaves the write applied and no answer sent, and
+  the idempotency store replays a 2xx answer to the same key and body for 24 h, so the
+  retry is client work
+  (<a href="https://github.com/openwrt-iac/terraform-provider-uapi/issues/45">terraform-provider-uapi#45</a>).
+  Recorded here only so the question is not re-opened as uapi work.</p>
 </li>
 </ul>
 <p>Everything else this section used to list has shipped, and the section had gone
@@ -627,8 +733,8 @@ stale enough to be misleading:</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/roadmap.md">repository</a>, never here.
+      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/roadmap.md">repository</a>, never here.
     </p>
   </div>
 </footer>

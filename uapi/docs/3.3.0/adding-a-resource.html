@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Adding a curated resource - uapi 3.2.0 docs</title>
+<title>Adding a curated resource - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / Adding a curated resource</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / Adding a curated resource</p>
   </div>
 </header>
 
@@ -38,6 +38,8 @@
 
     // OpenAPI hints (consumed by build/gen_openapi.uc, not by the runtime):
     openapi_required:    [&quot;field1&quot;, &quot;field2&quot;],    // emitted as `required: [...]` on the JSON Schema
+    openapi_read_required: [&quot;field3&quot;],            // required on the *Response schema only: every
+                                                  // read returns it, and a write may leave it out
     openapi_conditional: [                        // emitted as `allOf: [...]`; if/then/required
         { if:   { properties: { proto: { const: &quot;wireguard&quot; } }, required: [&quot;proto&quot;] },
           then: { required: [&quot;addresses&quot;] } },
@@ -58,6 +60,7 @@
 
     // Optional, less common:
     merge_for_patch: function(existing_json, body) { ... },  // nested-object merge
+    read_runtime:    function(section, conn) { ... },  // a runtime that a GET reads and a write does not. See &quot;Runtime that only a GET reads&quot; below.
     type_predicate:  function(t) { ... },  // dynamic-type resources (e.g. wireguard_&lt;iface&gt;)
     create_type:     function(body) { ... },
     id_prefix: &quot;x&quot;,                    // single char for generated IDs (defaults to type[0])
@@ -65,7 +68,8 @@
     create_if_missing: true,           // singletons only; opt-in. PATCH creates the uci section if absent instead of returning 404. See &quot;Singletons that may be wiped&quot; below.
     singleton_section_name: &quot;main&quot;,    // singletons only; default &quot;main&quot;. Override only when the underlying uci convention names the section differently.
     unique_field: &quot;name&quot;,              // optional. Value of this field must be unique among same-type sections in this package. See &quot;Cross-section reference fields&quot; below.
-    reload_if_running: [&quot;&lt;service&gt;&quot;], // optional. A daemon that also reads these fields but that an image can lack or the operator can stop, as odhcpd reads dhcp/servers. It is reloaded after `reload` when /etc/init.d/&lt;service&gt; exists and procd lists the service, and skipped without a 503 otherwise. A POST /batch reloads and lists its services sorted.
+    rewrite_when_named: [&quot;&lt;option&gt;&quot;], // optional. Options that a PATCH writes whenever the request names their field, which must carry the option's name, even when uci holds another spelling of the value that the read gives. For an option that two daemons read differently, such as `maindhcp` of dhcp/odhcpd, so that a write makes them agree.
+    reload_if_running: [&quot;&lt;service&gt;&quot;], // optional. A daemon that also reads these fields but that an image can lack or the operator can stop, as dnsmasq, odhcpd and unbound read dhcp/servers. It is reloaded after `reload` when /etc/init.d/&lt;service&gt; exists and procd holds a `config.change` trigger for the service, and skipped without a 503 otherwise. The write asks procd under its locks, and when the list names an installed unbound, those include the lock of `unbound`, whether unbound runs or not. A LuCI save reloads a daemon whose trigger is on the package that it commits, or on one that the package affects in LuCI's ucitrack, as `system` affects `dhcp`. uapi takes any `config.change` trigger instead: the list here already names the daemons that read the package, and a `system` write reaches unbound only through that `affects`. LuCI's ucitrack also has `network` affect `dhcp`, and a `network` resource lists only `odhcpd` here, for the reason that `docs/raw.md` gives. For dnsmasq, odhcpd and unbound, which each register one on `dhcp`, the two rules agree. A resource whose every daemon is such a daemon lists them all here and declares no `reload`. A POST /batch reloads and lists its services sorted.
 };
 </code></pre>
 <h3 id="section-name-id-at-create-time">Section name (<code>id</code>) at create time</h3>
@@ -197,7 +201,9 @@ each of them, unless the schema check or <code>validate()</code> already reporte
 refuses the write only for an error that it adds: one in a field that the write changes, one
 that the section did not have, by field, code and message, or one that was not live and is now.
 So a message names its rule and quotes no value: a message that quotes another field changes when
-that field changes, and the old error then reads as a new one.
+that field changes, and the old error then reads as a new one. A property in
+<code>tests/unit/handler_test.uc</code> puts a marker into each field of the fixture cases and fails on a
+message that holds it.
 An option and the list of its words, split on whitespace as netifd splits it, are the same
 value. Two lists are the same only entry by entry, because a daemon can read each entry as a line
 of its own. So a write that leaves a field alone is refused for an error that the field already
@@ -207,11 +213,11 @@ the others as in a 422. A write of one resource can make the stored values of an
 <code>validate()</code> of <code>network/interfaces</code> runs <code>validate_new()</code> of <code>network/wireguard_peers</code> over the
 peers of an interface that a write switches to wireguard or enables, and refuses their live
 errors. <code>validate()</code> and the schema check run as before: <code>validate()</code> sees the
-whole section, and the schema check sees what the caller sent, which for a JSON Patch is the read
-with the operations applied. The schema check does not see a write-only field that the handler
-carries from uci, because uci can hold it in a shape that the schema does not declare, such as an
-option where the schema says list, and the caller can neither see it nor send it. <code>validate()</code>
-sees it.</p>
+whole section, and the schema check sees what the caller sent, which for a JSON Patch is each field
+that its operations name and leave in the document, as they leave it. The schema check does not see a write-only field that
+the handler carries from uci, because uci can hold it in a shape that the schema does not declare,
+such as an option where the schema says list, and the caller can neither see it nor send it.
+<code>validate()</code> sees it.</p>
 <p><code>openapi_required</code>, <code>openapi_conditional</code>, <code>openapi_runtime</code> are picked
 up by <code>build/gen_openapi.uc</code> and produce a richer machine-readable
 contract for code generators (Terraform provider, OpenAPI client libs).
@@ -224,6 +230,15 @@ others, which <code>network.interfaces</code> generates from its applicability t
 that populate a non-empty <code>runtime: {...}</code>, define its sub-shape in
 <code>openapi_runtime</code> so clients can see the keys without reading source.</p>
 <p>For cross-reference validation (e.g. "this firewall rule's <code>src_zone</code> must be a real zone"), use the <code>conn</code> argument. See <code>firewall.rules.uc</code>'s <code>load_zones(conn)</code> for the pattern.</p>
+<h3 id="runtime-that-only-a-get-reads-read_runtime">Runtime that only a GET reads (<code>read_runtime</code>)</h3>
+<p><code>fromUci</code> builds <code>runtime</code> on every path, writes included, where it runs inside the transaction
+before the reload and the kernel apply. A runtime that comes from a process, or that the apply of
+the write changes, belongs in <code>read_runtime(section, conn)</code> instead: the handler calls it for a GET
+and a list, and puts what it returns in <code>runtime</code>, while <code>fromUci</code> returns <code>runtime: {}</code>. So a write
+answers <code>{}</code> and runs nothing under the lock for it, and so does a GET in a <code>/batch</code> that writes,
+whose sub-requests run before the apply of the batch: <code>main.uc</code> marks them with <code>batch_writes</code>. <code>network/wireguard_peers</code> reads <code>wg show</code> this
+way: read in a write, it would come from before the apply, and a POST would answer
+<code>in_kernel: false</code> beside <code>X-Kernel-Status: ok</code>.</p>
 <h2 id="3-json-conventions">3. JSON conventions</h2>
 <p>Per CLAUDE.md:</p>
 <ul>
@@ -293,7 +308,10 @@ value after the merge, so an unrelated PATCH (e.g. changing <code>verb</code> on
 openvpn instance) doesn't wipe the credential when the field is absent
 from the request body. That is <code>carry_write_only</code> in <code>handler.uc</code>, not
 <code>merge_for_patch</code>: the merge only ever sees the masked read view, which
-is why the hook takes no uci section.</p>
+is why the hook takes no uci section. The footprint that a PATCH deletes
+within holds the stored secret too, so a PATCH removes it when <code>toUci</code>
+drops it, as a PUT does: <code>network.interfaces</code> drops <code>private_key</code> on a
+switch away from wireguard.</p>
 <p>Mark the field <code>writeOnly: true</code> and the companion <code>readOnly: true</code> in
 <code>schema_properties</code> so a generator can distinguish them statically.</p>
 <p><strong>Never interpolate a write-only value into a <code>validate()</code> message.</strong> The
@@ -326,7 +344,7 @@ let errs = mod.validate({ ... }, c);
 <p><code>src/main.uc</code> has a <code>RESOURCES</code> registry (CRUD) and a <code>SINGLETONS</code> registry (single-section types like <code>system</code>). Both go through <code>load_resource</code>, which registers the source module into <code>RESOURCE_SOURCES</code> (the thing backing <code>/schema/&lt;...&gt;</code>) and derives the filename from the key by swapping <code>:</code> for <code>.</code>:</p>
 <pre><code class="language-ucode">&quot;&lt;domain&gt;:&lt;plural-type&gt;&quot;: handler.make(load_resource(&quot;&lt;domain&gt;:&lt;plural-type&gt;&quot;)),
 </code></pre>
-<p>So the module file has to be named <code>&lt;domain&gt;.&lt;plural-type&gt;.uc</code>, matching the key. That is not a new convention, it is what all 44 resources already do; the filename simply is not written a second time.</p>
+<p>So the module file has to be named <code>&lt;domain&gt;.&lt;plural-type&gt;.uc</code>, matching the key. That is not a new convention, it is what all 45 resources already do; the filename simply is not written a second time.</p>
 <p>Use <code>handler.make_singleton</code> for singletons, <code>handler.make_collection</code>
 for read-only runtime lists. Writable resources also automatically
 become eligible for <code>POST /batch</code> via main.uc's <code>BARE_RESOURCES</code> /
@@ -368,8 +386,8 @@ install_uapi
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/adding-a-resource.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/adding-a-resource.md">repository</a>, never here.
+      Rendered from <code>docs/adding-a-resource.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/adding-a-resource.md">repository</a>, never here.
     </p>
   </div>
 </footer>

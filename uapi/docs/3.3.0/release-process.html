@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi release process - uapi 3.2.0 docs</title>
+<title>uapi release process - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / uapi release process</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / uapi release process</p>
   </div>
 </header>
 
@@ -28,10 +28,10 @@ contains no compiled code - only ucode scripts and shell glue - so the same
 architecture (x86_64, aarch64, arm, mips, etc.) at the same OpenWrt major
 version. We do NOT build a separate APK per arch; the OpenWrt apk-tools
 install handles arch-neutral packages directly.</p>
-<p>The <code>release-apk</code> job builds a single APK (against the x86_64 SDK because
-that's the simplest to host on GitHub runners), smoke-tests it in an x86
-QEMU VM, and attaches that one artifact to the GitHub Release. The apk
-feed itself is rebuilt by
+<p>The <code>package</code> job builds a single APK (against the x86_64 SDK because
+that's the simplest to host on GitHub runners) and smoke-tests it in an x86
+QEMU VM, and the <code>release-apk</code> job attaches that one artifact to the GitHub
+Release. The apk feed itself is rebuilt by
 <code>openwrt-iac/openwrt-iac.github.io</code>'s <code>publish.yml</code> workflow, which
 pulls the latest stable Release asset from each source repo listed in
 its <code>feed.yml</code>. uapi no longer owns a gh-pages feed of its own.</p>
@@ -49,14 +49,17 @@ that produces no <code>.apk</code> - which is what 2.4.1 actually relied on. Per
 the SDK pins against a candidate without tagging:</p>
 <pre><code>gh workflow run ci.yml --ref main
 </code></pre>
-<p>This fires the same <code>unit + lint + integration + verify-arch-build</code>
-chain that a tag push would, minus the <code>release-apk</code> publish steps.
+<p>This fires the <code>unit + lint + integration + package + verify-arch-build</code>
+chain of a tag push, minus <code>release-apk</code>, which publishes, and minus the
+signature check of <code>package</code>, which runs only on a tag ref.
 Useful right after bumping <code>OPENWRT_VERSION</code> to confirm the new
 per-arch sha256 lines actually match upstream.</p>
 <p>Operators who want a runtime per-arch smoke test (the CI matrix only
 verifies compile) can run
-<code>tests/integration/release_apk_smoke.sh &lt;path-to-apk&gt;</code> against their own
-arch's QEMU VM or live router.</p>
+<code>tests/integration/release_apk_smoke.sh &lt;path-to-apk&gt; [&lt;path-to-3.2.0-apk&gt;]</code>
+against their own arch's QEMU VM or live router. With the second argument
+it also upgrades from 3.2.0, the last release whose package shipped
+<code>/etc/config/uapi</code>.</p>
 <h2 id="versioning">Versioning</h2>
 <p><code>VERSION</code> at the repo root drives every other version string:</p>
 <ul>
@@ -131,10 +134,13 @@ polish".</p>
    suite, so a green local <code>make test coverage</code> is necessary but not
    sufficient.</li>
 <li><strong>Open PR, get CI green</strong>: lint + unit + coverage gate + integration +
-   soak (RSS/fd growth thresholds) + bench. The bench measures and reports
-   per-endpoint p99; it does not gate, because no baseline is committed. Read
-   the numbers in the run log or the <code>bench-run</code> artifact if a release is
-   expected to move latency.</li>
+   soak (RSS/fd growth thresholds) + bench, and the <code>package</code> job, which the
+   change of <code>VERSION</code> triggers, so the APK and the upgrades from 3.2.0 are
+   tested before the tag exists. <code>package</code> is not a required check yet, so
+   a red <code>package</code> does not block the merge: read its result. The bench
+   measures and reports per-endpoint p99; it does not gate, because no
+   baseline is committed. Read the numbers in the run log or the <code>bench-run</code>
+   artifact if a release is expected to move latency.</li>
 <li><strong>Merge to main</strong>.</li>
 <li><strong>Sign and push the tag</strong>:
    <code>git tag -s v2.0.0 -m "v2.0.0"
@@ -146,23 +152,27 @@ polish".</p>
    gpg --armor --export &lt;YOUR-GPG-FINGERPRINT&gt; &gt; .github/release-signers.asc
    git add .github/release-signers.asc &amp;&amp; git commit -m "release: trust &lt;fingerprint&gt;"
    git push</code>
-   CI's release-apk job runs <code>git verify-tag</code> first; an unsigned tag (or a
-   tag from a signer not in the allowed list) fails the workflow before
-   any artifact is produced.</li>
-<li><strong>Watch the release-apk workflow.</strong> It runs (in order):
+   On a tag, CI's package job runs <code>git verify-tag</code> first; an unsigned tag (or a
+   tag from a signer not in the allowed list) fails <code>package</code> before it
+   builds anything, so <code>release-apk</code> creates no GitHub Release. Only the
+   Release is withheld: <code>integration</code> still uploads <code>bench-run</code>, and
+   <code>verify-arch-build</code> still uploads its per-arch APKs as workflow artifacts.</li>
+<li><strong>Watch the tag's CI run.</strong> The <code>package</code> job runs (in order):
    - tag signature verification
    - reproducible-SDK pin check (against <code>build/sdk.sha256</code>)
-   - SDK download + sha256 verify
+   - SDK download + sha256 verify, on a miss of the SDK cache
    - <code>make stage</code> (populate <code>build/openwrt/uapi/files</code>)
    - <code>make package/uapi/compile</code> in the SDK
-   - APK upload as workflow artifact
-   - VM smoke test (<code>tests/integration/release_apk_smoke.sh</code>)
-   - GitHub Release create + APK attach (always; RCs get <code>--prerelease</code>)</li>
-<li><strong>Verify the release</strong> is visible on GitHub Releases. The feed at
+   - APK and SBOM upload as workflow artifacts
+   - VM smoke test (<code>tests/integration/release_apk_smoke.sh</code>), including the
+     upgrade from the 3.2.0 APK</li>
+</ol>
+<p>Once <code>package</code> and <code>integration</code> pass, <code>release-apk</code> creates the GitHub
+   Release and attaches the APK and the SBOM (always; RCs get <code>--prerelease</code>).
+9. <strong>Verify the release</strong> is visible on GitHub Releases. The feed at
    <code>openwrt-iac.github.io/feed/</code> picks up the new asset on its next
    <code>publish.yml</code> run (nightly schedule or manual
-   <code>gh workflow run publish.yml --repo openwrt-iac/openwrt-iac.github.io</code>).</li>
-</ol>
+   <code>gh workflow run publish.yml --repo openwrt-iac/openwrt-iac.github.io</code>).</p>
 <h2 id="reproducible-builds">Reproducible builds</h2>
 <p>The SDK pin in <code>build/sdk.sha256</code> records the exact OpenWrt SDK tarball
 URL + sha256 used for the release. CI verifies the checksum before
@@ -244,7 +254,7 @@ first PR the check covered, nine PRs merged and none of them added an entry.</p>
 </ul>
 <p>After tagging, before announcing:</p>
 <ul>
-<li>[ ] release-apk workflow completed.</li>
+<li>[ ] package and release-apk jobs completed.</li>
 <li>[ ] verify-arch-build matrix completed (all three non-x86 arches green).</li>
 <li>[ ] APK attached to the GitHub Release.</li>
 <li>[ ] <strong>Stable releases only</strong>: trigger <code>gh workflow run publish.yml --repo
@@ -276,11 +286,12 @@ first PR the check covered, nine PRs merged and none of them added an entry.</p>
 adds a C component:</p>
 <ol>
 <li>Drop <code>PKGARCH:=all</code> from the package Makefile.</li>
-<li>Convert <code>release-apk</code> from a single job into a matrix over arch (same
-   matrix <code>verify-arch-build</code> uses today).</li>
+<li>Convert <code>package</code> from a single job into a matrix over arch (same
+   matrix <code>verify-arch-build</code> uses today), and have <code>release-apk</code> attach
+   every APK.</li>
 <li>The smoke test still only runs on x86_64 (the QEMU image we host); add
    per-arch QEMU images if real runtime coverage matters.</li>
-<li>Plan for ~4x release-apk runtime.</li>
+<li>Plan for ~4x package runtime.</li>
 </ol>
 <p>This is documented in case the principle is ever revisited; the
 architectural intent is that it should not be.</p>
@@ -290,8 +301,8 @@ architectural intent is that it should not be.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/release-process.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/release-process.md">repository</a>, never here.
+      Rendered from <code>docs/release-process.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/release-process.md">repository</a>, never here.
     </p>
   </div>
 </footer>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Operations - uapi 3.2.0 docs</title>
+<title>Operations - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / Operations</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / Operations</p>
   </div>
 </header>
 
@@ -20,9 +20,11 @@
   <div class="container docs-body">
 <h1 id="operations">Operations</h1>
 <h2 id="success-means-exit-0-not-runtime-convergence">"Success" means exit 0, not runtime convergence</h2>
-<p>A 2xx response to a write means: snapshot OK, validate OK, uci commit
-OK, and the init script's reload action exited 0. It does NOT mean the
-daemon has finished re-converging.</p>
+<p>A 2xx response to a write means: validate OK, and, when the write changed
+uci, uci commit OK and the init script's reload action exited 0. A write
+that changed nothing commits and reloads nothing, and says so with
+<code>X-Reload-Status: no_reload</code>. It does NOT mean the daemon has finished
+re-converging.</p>
 <p>The most dangerous case is <code>network/interfaces</code>: a write that produces a
 config netifd later rejects (bad proto, missing dep, conflicting
 addresses) can drop the management connection. uapi only sees the init
@@ -32,34 +34,59 @@ background.</p>
 <ul>
 <li><strong><code>X-Reload-Status</code></strong> response header on curated-resource writes: <code>ok</code> means the init
   script ran and exited 0, and <code>no_reload</code> means that no init script ran. The header is
-  intentionally not a "converged" promise. All 42 writable resources declare at least
-  one reload service, so <code>no_reload</code> means that the write changed nothing in uci, such as
-  a PATCH that names no field or sends the values that uci holds. A write that commits
-  nothing reloads nothing, since 3.2.0.</li>
+  intentionally not a "converged" promise. Each writable resource outside <code>dhcp</code> has
+  a reload service that it always runs, so there <code>no_reload</code> means that the write changed
+  nothing in uci, such as a PATCH that names no field, or a PUT or a PATCH that sends the values that uci holds.
+  A write that commits nothing reloads nothing, since 3.2.0 for a PATCH and since 3.3.0 for a PUT. A <code>dhcp</code> write reloads
+  dnsmasq, odhcpd and unbound only while procd runs them, so it also answers <code>no_reload</code>
+  when none of them runs. As for a LuCI save, procd runs such a daemon while it holds a
+  config trigger for it, from the start of the service to its stop, whatever the instances
+  show, so a write also starts again a daemon that crashed too often. At boot, unbound holds
+  no such trigger until 3 s after the last interface event, and a write leaves it as it is.
+  <code>unverified</code> means that the write kept its commit and that whether its
+  daemons take the new config is unknown: an init script was still running
+  when uapi stopped waiting for it, or the <code>dnsmasq --test</code> check after a
+  dhcp write did not finish, see below.</li>
 <li><strong><code>X-Reload-Services</code></strong>: comma-separated list of init scripts that
   ran. Useful for audit/log correlation.</li>
 </ul>
 <p>unbound and dnsmasq are the exceptions. When unbound runs, a write that
 reloads <code>unbound</code> or <code>unbound-uci-ext</code> waits 2 s for each unbound instance to
-keep running. If one stops, the write answers <code>500 reload_failed_restored</code>,
-and its <code>reload_error</code> reads
-<code>unbound stopped after the reload, with exit code 1</code>. So a 2xx on these writes
-also means that procd did not report unbound as stopped in the 2 s after the
-reload. An instance that <code>service list</code> does not show, because something
-restarts it or the ubus call fails, does not count, and a daemon that stops
-later than 2 s still answers 2xx.</p>
-<p>dnsmasq is checked by its config. After a write that reloads <code>dnsmasq</code>, as a
-write to <code>dhcp/servers</code>, <code>dhcp/hosts</code>, <code>dhcp/dnsmasq</code>, the raw <code>dhcp</code> package
-or a <code>/batch</code> that holds one does, and a write to <code>dhcp/odhcpd</code> while procd
-runs dnsmasq, uapi runs the command of each dnsmasq
-instance with <code>--test</code> on the config that dnsmasq.init just wrote. If dnsmasq
-refuses it, the write answers <code>500 reload_failed_restored</code>, and its
-<code>reload_error</code> reads, for example,
+keep running. A write to <code>dhcp/servers</code>, <code>dhcp/hosts</code>, <code>dhcp/dnsmasq</code>,
+<code>dhcp/odhcpd</code>, <code>system</code> or the raw <code>dhcp</code> and <code>system</code> packages reloads
+<code>unbound</code> while procd runs it, and waits the 2 s too when unbound ran before
+the write. While <code>/etc/init.d/unbound</code> exists, each of these writes also
+takes the lock of <code>unbound</code> before it asks procd, whether unbound runs or
+not, so a write to <code>unbound/server</code>, <code>unbound/srv</code> or <code>unbound/ext</code>, or
+another of these writes, at the same moment answers <code>423 locked</code>. A network
+or wireless write reloads no unbound and takes no such lock. If an
+instance stops, the write answers <code>500 reload_failed_restored</code>, and its
+<code>reload_error</code> reads <code>unbound stopped after the reload, with exit code 1</code>. So a
+2xx on these writes also means that procd did not report unbound as stopped in
+the 2 s after the reload. An instance that <code>service list</code> does not show,
+because something restarts it or the ubus call fails, does not count, and a
+daemon that stops later than 2 s still answers 2xx.</p>
+<p>dnsmasq is checked by its config. A write to <code>dhcp/servers</code>, <code>dhcp/hosts</code>,
+<code>dhcp/dnsmasq</code>, <code>dhcp/odhcpd</code>, the raw <code>dhcp</code> package, or a <code>/batch</code> that
+commits <code>dhcp</code>, reloads <code>dnsmasq</code> while procd runs it, and then uapi runs the
+command of each dnsmasq instance with <code>--test</code> on the config that dnsmasq.init
+just wrote. If dnsmasq refuses it, the write answers
+<code>500 reload_failed_restored</code>, and its <code>reload_error</code> reads, for example,
 <code>dnsmasq refuses its config cfg01411c: bad IP address at line 33 of /var/etc/dnsmasq.conf.cfg01411c</code>.
 The check covers every instance, one that is not running included, since
 procd starts it on that config. So on a router whose dnsmasq config was
 refused before the write, a write that does not fix it answers
-<code>500 reload_failed_unrecovered</code>. <code>--test</code> parses the config and the files of
+<code>500 reload_failed_unrecovered</code>. A <code>--test</code> that cannot run, because fork
+fails, fails the write in the same way. A <code>--test</code> that does not finish within
+10 s is killed, and judges nothing: the write keeps its commit and answers 2xx
+with <code>X-Reload-Status: unverified</code>, and a raw write a <code>reload_note</code>. uapi cannot
+tell the time bound from another <code>SIGKILL</code>, such as the OOM killer's, so both
+read the same. A <code>conf-file</code> on a mount that hangs therefore holds the locks
+for 10 s per instance, where it held them until uhttpd killed the request with
+no answer. A parse of a <code>conf-dir</code> with 500k <code>address=/x/</code> lines took 0.6 s on
+x86. A target that takes longer than 10 s to parse its config, such as a slow
+MIPS router with large adblock lists, answers <code>unverified</code> on every dhcp write,
+and dnsmasq itself is not affected. <code>--test</code> parses the config and the files of
 <code>conf-file</code> and <code>conf-dir</code>, and exits. It does not read the files of
 <code>addn-hosts</code> and <code>servers-file</code>, which dnsmasq reads after it starts. A config
 that dnsmasq parses but cannot start with, such as <code>min-port</code> above
@@ -67,8 +94,62 @@ that dnsmasq parses but cannot start with, such as <code>min-port</code> above
 daemon holds, still answers 2xx. No write waits for the daemon to start. Each
 write pays one parse of the whole config per instance, which grows with its
 size, such as a <code>conf-dir</code> of adblock lists, and pays it again on a restore.
+A write to <code>system</code>, <code>system/timeservers</code> or the raw <code>system</code> package reloads
+dnsmasq too, for the hostname and NTP, but runs no check: a config that dnsmasq
+refused before, or a slow parse, must not fail or undo a hostname or NTP
+change.
 OpenWrt's reload of dnsmasq can restart the daemon, which on a slow machine can
 leave it stopped for 5 s, and uapi does not report that restart.</p>
+<p>uapi runs the reloads of a write in order and waits for them for 20 s in all,
+those of a restore included. A system write reloads up to five services, and
+the 20 s cover them all. uapi does not kill a reload that runs longer: it
+answers without it, the write keeps its commit and answers 2xx with
+<code>X-Reload-Status: unverified</code>, and a raw write a <code>reload_note</code> such as
+<code>firewall reload was still running when the 20 s that uapi waits for the
+reloads of a request ran out, so its result is unknown, and the reloads of
+dnsmasq, odhcpd follow it unless it fails</code>. A <code>system/cron_jobs</code> write answers
+the header too, and logs the note to syslog as <code>uapi-cron-reload-unverified</code>.
+The reloads after the one still running start when it ends, unless it fails,
+and uapi does not learn how they end, so check the daemon. No stay-up watch or
+<code>dnsmasq --test</code> check runs after such a reload. Before 3.3.0, uhttpd killed a
+request whose reload did not end at its 60 s script timeout and answered 502,
+and uci kept the new config with no restore. Killing the reload at a bound does
+not help: rc.common's <code>procd_lock</code> keeps the lock of the service in the
+children of the script, such as fw4, so the next reload of that service waits
+until they end. A reload that exits with a code other than 0 within the 20 s
+fails the write and restores, as before. A reload that takes longer and then
+fails answers 2xx <code>unverified</code>, and the failure shows only in the daemon. The
+restore gets what is left of the 20 s, so a reload that fails after more than
+about 10 s can leave too little time for the reloads of the restore, and the
+write then answers <code>500 reload_failed_unrecovered</code>. uapi waits for the script
+alone, so a process that the script starts and leaves running no longer holds
+the write. The lock of the write is released when uapi answers, so the next
+write can commit and reload while such a reload still runs. Its reload of the
+same service waits for the lock of <code>procd_lock</code> within its own 20 s. If the
+writes to one service answer <code>unverified</code> again and again, a reload of that
+service does not end: look for its blocked init script with <code>ps</code>.</p>
+<p>A write to one package that fails and restores takes at most 20 s of reloads,
+2 s of the unbound watch and 10 s of <code>dnsmasq --test</code> per dnsmasq instance
+after the reloads of the write and again after those of the restore, and up to
+5 s of the restore waiting for libuci's flock: 49 s with one dnsmasq instance,
+inside uhttpd's default <code>script_timeout</code> of 60 s. A <code>POST /batch</code> restore adds
+up to 5 s of flock wait for each further package that it writes back, and the
+<code>wg set</code> of a kernel apply or reconcile has no time bound. uapi does not read
+<code>script_timeout</code>. Set it lower, through <code>uhttpd/instances</code> or otherwise, and
+uhttpd can kill such a request before its restore or its answer: the client
+gets a 502, and uci keeps whatever the write had reached. Keep it at 60 s or
+above on a router that uapi manages.</p>
+<p>A LuCI save or a <code>uci commit</code> in a shell takes no uapi lock, so it can commit
+to the package while uapi reloads its daemons. When that reload then fails,
+the file holds both writes, and the restore would undo the other one too. uapi
+leaves the package as that writer left it, reloads nothing for it, and answers
+<code>500 reload_failed_unrecovered</code>, whose <code>restore_error</code> names the package. The
+daemon keeps what the failed reload gave it, so check the package and reload
+it by hand. In a <code>POST /batch</code>, the other packages are restored, and the
+services of the packages that the restore wrote back are reloaded. A daemon
+that also reads the package that it left is reloaded through them and reads
+that package as it is: in a batch of <code>system</code> and <code>dhcp</code> whose <code>dhcp</code> it left,
+dnsmasq, odhcpd and unbound reload through <code>system</code>.</p>
 <p>For high-stakes writes (the management interface, firewall defaults,
 uhttpd itself) verify convergence out-of-band: poll the <code>runtime</code> block
 on the resource you just modified, check ubus state, or simply ping the
@@ -179,6 +260,9 @@ uapi[1234]: uapi-internal 01HX567890ABCDEFGHJKMNNNNN: Type error: ...
 
 # Insecure-bypass marker triggered
 uapi[1234]: uapi-insecure-bypass 01HX67890ABCDEFGHJKMNNNNNN GET /system status=200 remote=10.0.2.2
+
+# A request body that missed the read deadline
+uapi[1234]: uapi-body-deadline 01HX7890ABCDEFGHJKMNNNNNNN POST /firewall/rules status=400 remote=10.0.2.2
 </code></pre>
 <p>By default only AUDIT (successful writes) and ERROR/WARN (failures) are logged. Optional knobs in <code>/etc/config/uapi</code>:</p>
 <pre><code>config logging
@@ -246,17 +330,20 @@ at its next increment.</p>
 <p>The <code>token_id</code> label is not bounded by the operator, because a client can
 mint a token per run, as the Terraform provider's ephemeral <code>uapi_token</code>
 does. A mint and a revoke bound it, over HTTP and with <code>uapi-token</code>, under
-the lock of the <code>uapi</code> package. After its commit, each one folds every
-series of a token that no longer authenticates (revoked, expired, or
-deleted from <code>/etc/config/uapi</code> by hand) into the series with the same
-other labels and <code>token_id="-retired"</code>, which no token can be named. The
-count is added there, and the token's file is deleted once the added count
-is on disk. The values of <code>token_id</code> are then the tokens that still
-authenticated at the last mint or revoke, <code>-</code> and <code>-retired</code>, and two kinds
-that the next mint or revoke folds: a token that revoked itself, as its
-revoke is recorded after the fold, and a token with a request in flight
-at its revoke. A client that mints tokens with no expiry and never revokes
-them keeps every one of them live, and nothing bounds those.</p>
+the lock of the <code>uapi</code> package. Each one folds every series of a token
+that no longer authenticates (revoked, expired, or deleted from
+<code>/etc/config/uapi</code> by hand) into the series with the same other labels and
+<code>token_id="-retired"</code>, which no token can be named. The count is added
+there, and the token's file is deleted once the added count is on disk. A
+mint, over HTTP and with <code>uapi-token create</code>, folds before its commit, so
+that a request that uhttpd kills during the fold cannot lose the bearer of a
+token that it committed. A revoke folds after its commit. The values of
+<code>token_id</code> are then the tokens that still authenticated at the last mint or
+revoke, <code>-</code> and <code>-retired</code>, and two kinds that the next mint or revoke
+folds: a token that revoked itself, as its revoke is recorded after the
+fold, and a token with a request in flight at its revoke. A client that
+mints tokens with no expiry and never revokes them keeps every one of them
+live, and nothing bounds those.</p>
 <p>What a scrape sees at a fold: the token's series is gone, and the
 <code>-retired</code> series of the same method, path and status has grown by the
 token's count. Folds run one at a time under the lock, so none of them
@@ -303,6 +390,8 @@ curated <code>prometheus_node_exporter_lua/config</code> resource manages
 node_exporter's config separately.</p>
 <h2 id="rate-limiting">Rate limiting</h2>
 <p>Per-token token-bucket, file-backed at <code>/var/run/uapi-ratelimit/&lt;token&gt;.txt</code>.
+A token whose name is longer than 63 characters, which only <code>uapi-token</code>
+can create, has its bucket under the sha256 of its name instead.
 Defaults: <strong>100 req/s, burst 200</strong> per token. Tune globally via
 <code>/etc/config/uapi</code>:</p>
 <pre><code>config ratelimit
@@ -320,8 +409,9 @@ security control on its own; use <code>allowed_cidrs</code> on the token for act
 source-IP enforcement.</p>
 <h2 id="diagnostics">Diagnostics</h2>
 <p><code>GET /api/v3/diagnostics</code> returns version, uptime, loaded resources,
-the uapi lock files present under <code>/var/lock</code>, and the last 20 error
-envelopes. Scope: <code>uapi:diagnostics:ro</code>.</p>
+the uapi lock files present under <code>/var/lock</code>, whether uapi uses each
+state directory under <code>/var/run</code>, and the last 20 error envelopes. Scope:
+<code>uapi:diagnostics:ro</code>.</p>
 <pre><code class="language-json">{
   &quot;version&quot;: &quot;2.0.0&quot;,
   &quot;uptime_seconds&quot;: 123456,
@@ -329,6 +419,13 @@ envelopes. Scope: <code>uapi:diagnostics:ro</code>.</p>
   &quot;lock_state&quot;: {
     &quot;global_held&quot;: false,
     &quot;per_package&quot;: {}
+  },
+  &quot;state_dirs&quot;: {
+    &quot;/var/run/uapi-error-ring&quot;: true,
+    &quot;/var/run/uapi-idempotency&quot;: true,
+    &quot;/var/run/uapi-metrics&quot;: true,
+    &quot;/var/run/uapi-ratelimit&quot;: true,
+    &quot;/var/run/uapi-token-update&quot;: true
   },
   &quot;recent_errors&quot;: [
     { &quot;ts&quot;: 1780510463, &quot;request_id&quot;: &quot;01HX...&quot;, &quot;code&quot;: &quot;validation_failed&quot;,
@@ -409,6 +506,51 @@ which locks are held right now: <code>flock</code> is released when the fd close
 and the file itself is never unlinked, so an entry means that package
 has been written at least once since the lock directory was last
 cleared.</p>
+<p><code>state_dirs</code> reports each state directory under <code>/var/run</code>, keyed by its
+path, as uapi finds it. The read creates and changes nothing.</p>
+<ul>
+<li><code>true</code>: a directory that the effective uid of the request process owns,
+  with mode 0700. uapi writes there.</li>
+<li><code>false</code>: the path holds anything else, and uapi does not use it as it
+  stands. A directory that uapi narrows to 0700 at its next write there, as
+  <code>docs/architecture.md</code> § Where state lives describes, reads <code>false</code> until
+  that write.</li>
+<li><code>null</code>: the path does not exist yet. uapi creates it at its first write
+  there.</li>
+</ul>
+<p><code>true</code> does not promise free space. On a full tmpfs the rate limiter allows
+every request, and the idempotency cache, the metrics and the error ring
+keep no new entry. What <code>false</code> costs while it lasts:</p>
+<table>
+<thead>
+<tr>
+<th>Directory</th>
+<th>While it reads <code>false</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/var/run/uapi-ratelimit</code></td>
+<td>The rate limiter allows every request.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-idempotency</code></td>
+<td>A request with an <code>Idempotency-Key</code> replays nothing, so a retry runs again.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-metrics</code></td>
+<td><code>/metrics</code> records no series.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-error-ring</code></td>
+<td><code>recent_errors</code> stays empty.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-token-update</code></td>
+<td>No request stamps <code>last_used_at</code>.</td>
+</tr>
+</tbody>
+</table>
 <h2 id="management-path-warning">Management-path warning</h2>
 <p>The lockout this guards against is the one atomic writes cannot help with: a change that
 reloads cleanly and then severs the only path to the box. uapi warns rather than refuses,
@@ -468,6 +610,13 @@ package they installed.</p>
 <pre><code>uapi-insecure-bypass &lt;request_id&gt; &lt;method&gt; &lt;path&gt; status=&lt;n&gt; remote=&lt;addr&gt;
 </code></pre>
 <p>so it shows up in <code>logread</code> and any remote-syslog collector. Delete the marker for production use.</p>
+<h2 id="request-body-deadline">Request body deadline</h2>
+<p>The body of a request has to arrive in full within 10 s of its start (<code>docs/security.md</code>, Public endpoints). Every request that misses the deadline emits a syslog <code>WARNING</code> line, on every path, with no body content:</p>
+<pre><code>uapi-body-deadline &lt;request_id&gt; &lt;method&gt; &lt;path&gt; status=&lt;n&gt; remote=&lt;addr&gt;
+</code></pre>
+<p>The status is the answer that the request got: <code>400</code> when uapi read the body and it did not arrive in full, or the normal answer of a request that answers without reading its body, such as a 413 or a GET with a declared body. Many such lines from one address are a client that holds the request slots of uhttpd. Without <code>ucode-mod-io</code> there is no deadline, and the handler logs one line when uhttpd starts:</p>
+<pre><code>uapi-body-deadline: ucode-mod-io is not installed, so a request body that does not arrive holds its request until the script timeout of uhttpd
+</code></pre>
 <h2 id="capacity">Capacity</h2>
 <p>uapi runs in-process inside uhttpd via uhttpd-mod-ucode. Each request is a forked CGI child. On low-end MIPS hardware, fork+ucode+ubus is in the tens of milliseconds per request; on modern aarch64/x86_64 it is sub-10ms. The intended workload is Terraform applies plus occasional curl, not high-volume RPC. If you need RPS in the hundreds, front uapi with a caching reverse proxy.</p>
 <h2 id="backups">Backups</h2>
@@ -478,8 +627,8 @@ package they installed.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/operations.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/operations.md">repository</a>, never here.
+      Rendered from <code>docs/operations.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/operations.md">repository</a>, never here.
     </p>
   </div>
 </footer>

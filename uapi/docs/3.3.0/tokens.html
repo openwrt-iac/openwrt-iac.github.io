@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tokens and scopes - uapi 3.2.0 docs</title>
+<title>Tokens and scopes - uapi 3.3.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.2.0 / Tokens and scopes</p>
+       <a href="/uapi/docs/">docs</a> / 3.3.0 / Tokens and scopes</p>
   </div>
 </header>
 
@@ -29,7 +29,7 @@ authorized against a hierarchical scope tree.</p>
                   [--force]
 </code></pre>
 <ul>
-<li><code>--name</code>: human-readable label. Must be unique. Must match <code>[A-Za-z0-9_]+</code> (uci section-name charset; use underscores instead of hyphens). Surfaces in the audit log on every authed request.</li>
+<li><code>--name</code>: human-readable label. Must be unique: a name that another section of <code>/etc/config/uapi</code> already holds is refused. Must match <code>[A-Za-z0-9_]+</code> (uci section-name charset; use underscores instead of hyphens). Surfaces in the audit log on every authed request. <code>POST /tokens</code> takes at most 63 characters, and the CLI takes any length. A longer name keeps its rate-limit bucket and its last-used marker in a file named by the sha256 of the name, because a file name holds 255 bytes. A name longer than 238 characters gets no series in <code>/metrics</code>, whose files are named by their labels.</li>
 <li><code>--scope</code>: at least one. May repeat. Validated against the known scope tree (see below); <code>--force</code> bypasses.</li>
 <li><code>--expires-in</code>: optional duration. Suffix is one of <code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>. The token returns <code>401 invalid_token</code> with <code>message: "Token expired"</code> after the deadline passes.</li>
 <li><code>--allowed-cidr</code>: optional source-IP allowlist (IPv4 or IPv6 CIDRs; may repeat). When set, the token returns <code>401 invalid_token</code> with <code>message: "Source IP not permitted for this token"</code> from any other source. Bad CIDR shape rejected at mint time.</li>
@@ -63,8 +63,18 @@ is 1 to 3 digits: an entry such as <code>fd00::/0x40</code>, which 3.1 read as <
 and a stored one admits no caller. The validation sweep does not cover tokens, so
 <code>uapi-token list</code> is where a stored entry shows.</p>
 <p>The caller's scopes must cover the requested scopes, equal or narrower. Escalation
-returns <code>403 scope_escalation_blocked</code>. The same request with a name
-that's already in use returns <code>409 conflict</code>.</p>
+returns <code>403 scope_escalation_blocked</code>. A name that a token or another
+section of the token store already holds returns <code>409 conflict</code>.</p>
+<p>A mint removes the rate-limit buckets and the last-used markers of the tokens that no longer
+authenticate, and folds their metric series into <code>token_id="-retired"</code>, before it commits the
+new token. A request that uhttpd kills during that cleanup has committed nothing, so it cannot
+lose the bearer of a token that exists. <code>uapi-token create</code> cleans up the same way, then
+commits, then prints the bearer.</p>
+<p>uapi keeps no cleartext bearer, with one exception. A <code>POST /tokens</code> that carries an
+<code>Idempotency-Key</code> is cached with its response, bearer included, for 24 h, in a file of mode 0600
+that only root can read. A retry by the same token with the same key and body gets that
+response back, so for such a client a request killed after the cache write loses no bearer
+either.</p>
 <pre><code class="language-sh">curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v3/tokens
 curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v3/tokens/ci_bot
 curl -H &quot;Authorization: Bearer $ADMIN&quot; -X DELETE https://router/api/v3/tokens/ci_bot
@@ -151,7 +161,7 @@ segment for wildcards:</p>
 </tr>
 <tr>
 <td><code>network</code></td>
-<td><code>interfaces</code>, <code>devices</code>, <code>routes</code>, <code>rules</code>, <code>bridge_vlans</code>, <code>wireguard_peers</code></td>
+<td><code>interfaces</code>, <code>devices</code>, <code>routes</code>, <code>rules</code>, <code>bridge_vlans</code>, <code>wireguard_peers</code>, <code>wireguard_kernel_peers</code></td>
 </tr>
 <tr>
 <td><code>wireless</code></td>
@@ -350,8 +360,8 @@ backdoor around carefully-crafted curated scopes.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/tokens.md</code> at tag <code>v3.2.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.2.0/docs/tokens.md">repository</a>, never here.
+      Rendered from <code>docs/tokens.md</code> at tag <code>v3.3.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/tokens.md">repository</a>, never here.
     </p>
   </div>
 </footer>
