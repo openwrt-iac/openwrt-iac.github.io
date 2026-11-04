@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Roadmap - uapi 3.3.0 docs</title>
+<title>Roadmap - uapi 3.4.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.3.0 / Roadmap</p>
+       <a href="/uapi/docs/">docs</a> / 3.4.0 / Roadmap</p>
   </div>
 </header>
 
@@ -354,6 +354,10 @@ guess is the opposite of what a major is for. See <code>docs/ucode-quirks.md</co
   rate-limit buckets, the error ring and the last-used markers of the tokens keep their files
   under <code>/var/run</code>, in directories of mode 0700 with files of mode 0600 (#266, #270).</li>
 </ul>
+<h2 id="shipped-in-340">Shipped in 3.4.0</h2>
+<ul>
+<li>The <a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">3.4.0 changelog section</a> carries the release: the v4 program announced in the published spec and the deprecations log, and the boolean sets verified against the pinned uci and ubox sources.</li>
+</ul>
 <h2 id="shipped-in-330">Shipped in 3.3.0</h2>
 <ul>
 <li>
@@ -660,61 +664,31 @@ stale enough to be misleading:</p>
   Two idempotency stores of one key no longer share a temp file (#270).</li>
 </ul>
 <h2 id="objectives-for-the-next-major">Objectives for the next major</h2>
+<p>The sweep list for v4, tracked in the <a href="https://github.com/openwrt-iac/uapi/milestone/1">v4 milestone</a>. At v4 planning, read it top to bottom: every line must resolve to an open issue in the milestone, or be explicitly descoped in the release PR with the reason. The mechanisms, the evidence and the open questions live in the issues.</p>
 <ul>
-<li>
-<p><strong>Routes <code>table</code> and rules <code>lookup</code> accept table names on write.</strong> netifd resolves both
-  through <code>/etc/iproute2/rt_tables</code>, and LuCI writes the name. Since 3.2.0 a read resolves a
-  stored name to its id, so the integer type stays and a PUT of the read writes the id. Taking
-  a name on write needs the type to become a string or a union, which is breaking under
-  <code>docs/versioning.md</code> (<a href="https://github.com/openwrt-iac/uapi/issues/240">#240</a>).</p>
-</li>
-<li>
-<p><strong><code>network/interfaces.ip6prefix</code> stops taking a string on write.</strong> Since 3.2.0 a read is
-  always an array, and a write still takes the space-separated string that the 3.1 spec
-  declared (<a href="https://github.com/openwrt-iac/uapi/issues/241">#241</a>). The removal deletes, in one
-  go: <code>"string"</code> in the type, the <code>x-uapi-write-string</code> marker and its branch in
-  <code>build/gen_openapi.uc</code> (the check in <code>tests/lint_openapi_shape.uc</code> that no source marker
-  reaches the spec stays), the string path in <code>toUci</code> and <code>validate()</code>, the sentence in the
-  field description, the row in <code>docs/deprecations.md</code> and the <code>ip6prefix</code> example in
-  <code>docs/versioning.md</code>, and it adds a row to the v3-to-v4 migration document.</p>
-</li>
-<li>
-<p><strong>One rule for newlines in curated strings.</strong> 3.2.0 refuses a newline field by field, after an
-  audit of the daemon that reads each field, and each new field that a daemon reads as one line
-  needs the same audit. About a third of the writable string fields still take a newline or a
-  carriage return, and only <code>system.notes</code> holds several lines on purpose. A default refusal of
-  both in <code>check_schema_types</code>, with an opt-out annotation for <code>system.notes</code>, ends the audits.
-  It is breaking for the free-text fields, such as descriptions, where no daemon gives the
-  evidence that the tightening carve-out needs
-  (<a href="https://github.com/openwrt-iac/uapi/issues/276">#276</a>).</p>
-</li>
-<li>
-<p><strong><code>mwan3/interfaces.family</code> is required, or an unset one reads as <code>ipv4</code>.</strong> mwan3 reads an
-  unset family as ipv4 (<code>mwan3.sh</code> and <code>mwan3track</code> both default it), and a read gives null. The
-  spec requires the key and takes null, and <code>validate()</code> does not require a value. So on the
-  stock <code>wan6</code>, which sets <code>family 'ipv6'</code>, <code>PATCH {"family": null}</code> answers 200, and mwan3 then
-  handles wan6 as IPv4 while the read says null. Since 3.2.0 the field description says that a
-  null removes the option and that mwan3 then uses ipv4. Refusing the null tightens what a write
-  takes, and reading <code>ipv4</code> changes what a read of an unset family gives, so either waits for
-  the major.</p>
-</li>
-<li>
-<p><strong>A <code>wireless/interfaces</code> section with no <code>mode</code> reads as null instead of <code>ap</code>.</strong> wifi-scripts
-  sets up nothing for such a section, because its switch on the mode skips an absent mode as it
-  skips any mode that it does not know (<code>mac80211.sh:260</code>). uapi reads the section as <code>ap</code>, so a
-  read reports an access point that does not exist. The read change is breaking, because the
-  Response then takes null and every such section reads differently.</p>
-</li>
-<li>
-<p><strong>Whether to check every field at each save, as LuCI does.</strong> LuCI validates each visible field
-  of a form when it saves, so a stored value that breaks a rule blocks every save of the section
-  until it is fixed. For the rules in <code>validate_new()</code>, uapi refuses a write only for an error
-  that the write adds (<code>new_errors()</code> in <code>src/lib/handler.uc</code>): one in a field that it changes,
-  one that the section did not have, or a dormant one that it makes live. So a write that leaves
-  a stored value alone passes, even one that only disables the section, and
-  <code>GET /api/v3/diagnostics?validate=1</code> lists the value. LuCI's model refuses writes that 3.1.0
-  accepts, so adopting it is breaking.</p>
-</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/240">Routes <code>table</code> and rules <code>lookup</code> accept table names on write</a>: the type becomes a string or a union, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/241"><code>network/interfaces.ip6prefix</code> stops taking a string on write</a>: announced since 3.2.0, the only open deprecation window.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/276">One rule for newlines in curated strings</a>: a default refusal in <code>check_schema_types</code>, with an opt-out for <code>system.notes</code>.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/306"><code>mwan3/interfaces.family</code> is required, or an unset one reads <code>ipv4</code></a>: either way breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/307">A <code>wireless/interfaces</code> section with no <code>mode</code> reads null instead of <code>ap</code></a>: a read today reports an access point that does not exist.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/308">Refuse a write for any stored error the section holds, as LuCI does</a>: the <code>new_errors()</code> model changes.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/309">Record and report interrupted writes</a>: the write journal, the report half only. The only open finding of the lock-state audit, and the only hole left in the transaction contract.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/310">Retire <code>normalize_bool</code>, boolean reads follow the platform's reader</a>: prerequisite is <a href="https://github.com/openwrt-iac/uapi/issues/312">reading libvalidate's accepted set out of ubox</a>, in a 3.x.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/311">Widen <code>network/interfaces.disabled</code> to the platform boolean</a>: conditional on the OpenWrt branch carrying netifd <code>e97e36f</code> at v4 time. The unit test that pins the per-type difference says when.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/313">Announce the v4 program in a final 3.x minor</a>: the deprecations log and the spec's "Upcoming in v4" block. The window runs from that release, not from v4.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/319">Group the special endpoints under <code>/uapi/...</code></a>: the paths and the scopes disagree today, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/320">Merge <code>dhcp/leases6</code> into <code>dhcp/leases</code></a>: one endpoint less, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/321">Drop <code>managed</code> and the adopt flow</a>: the envelope loses a field and a route, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/322">One documented runtime envelope on every resource</a>: 4 of 45 resources document their runtime today, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/323">Prune dead error codes from the enum</a>: <code>unsupported_media_type</code> is the documented-dead one, breaking for generated clients.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/324">Ship the standalone confirm arm <code>POST /confirm</code></a>: the authz model is decided, additive.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/325">Per-operation headers in the batch 207 results</a>: the batch stops throwing away what a single request says, additive.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/326">Configurable limits from <code>/etc/config/uapi</code></a>: the compile-time bounds become options, additive.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/327">Generalize read-only runtime collections</a>: the recipe behind leases and kernel peers, applied to more state, additive.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/328">Route table in dispatch, unify the special non-uci resources</a>: ~400 lines of hand-coded verb ladders, internal.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/329">Consolidate the <code>x-uapi-*</code> marker namespace</a>: four vendor markers, one of which dies with #241, internal.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/330">Generalize or document the wireguard dynamic-type and kernel-ops machinery</a>: six hooks exercised by one resource, internal.</li>
+<li>The mount moves to <code>/api/v4</code> and the install hook strips every older prefix, as each major moved it before. The v3-to-v4 migration document rides the release.</li>
 </ul>
 <h2 id="out-of-scope-by-design">Out of scope by design</h2>
 <ul>
@@ -733,8 +707,8 @@ stale enough to be misleading:</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.3.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.3.0/docs/roadmap.md">repository</a>, never here.
+      Rendered from <code>docs/roadmap.md</code> at tag <code>v3.4.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.4.0/docs/roadmap.md">repository</a>, never here.
     </p>
   </div>
 </footer>
