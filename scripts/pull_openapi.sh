@@ -11,8 +11,9 @@ set -eu
 
 mkdir -p "$STAGING_DIR/uapi/api"
 
-latest=$(gh release list --repo openwrt-iac/uapi --exclude-pre-releases \
-         --limit 1 --json tagName --jq '.[0].tagName // ""')
+# The release that GitHub marks Latest, as scripts/aggregate.sh takes it for the feed.
+latest=$(gh release list --repo openwrt-iac/uapi --exclude-pre-releases --exclude-drafts \
+         --limit 100 --json tagName,isLatest --jq 'map(select(.isLatest))[0].tagName // ""')
 if [ -z "$latest" ]; then
   echo "[openapi] no stable uapi release; leaving uapi/api/openapi.json untouched"
   exit 0

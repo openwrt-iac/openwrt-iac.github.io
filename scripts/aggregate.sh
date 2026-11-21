@@ -35,9 +35,10 @@ printf '%s\n' "$records" | while IFS="	" read -r repo pattern; do
   # source has no stable release yet, skip it without failing the whole run.
   # --exclude-drafts matters as much: a deleted tag reverts its release to a draft,
   # and a token that can see drafts would otherwise feed an unpublished build to
-  # every operator on the feed.
-  latest=$(gh release list --repo "$repo" --exclude-pre-releases --exclude-drafts --limit 1 \
-           --json tagName --jq '.[0].tagName // ""' 2>/dev/null || true)
+  # every operator on the feed. The newest release can fix an older major after the current one
+  # shipped, so the feed takes the release that GitHub marks Latest, not the newest.
+  latest=$(gh release list --repo "$repo" --exclude-pre-releases --exclude-drafts --limit 100 \
+           --json tagName,isLatest --jq 'map(select(.isLatest))[0].tagName // ""' 2>/dev/null || true)
   if [ -z "$latest" ]; then
     echo "[aggregate]   no stable release on $repo, skipping"
     continue
