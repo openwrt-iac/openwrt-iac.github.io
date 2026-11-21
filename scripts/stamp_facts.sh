@@ -24,8 +24,9 @@ fi
 # uapi-2.5.1-r1.apk yields 2.5.1-r1. Deriving it as version + "-r1" would be a guess that breaks
 # the first time PKG_RELEASE moves.
 # `gh release list --json` has no assets field, so resolve the tag first and then view it.
-tag=$(gh release list --repo openwrt-iac/uapi --exclude-pre-releases --limit 1 \
-      --json tagName --jq '.[0].tagName // ""')
+# The release that GitHub marks Latest is the one the feed serves (scripts/aggregate.sh).
+tag=$(gh release list --repo openwrt-iac/uapi --exclude-pre-releases --exclude-drafts --limit 100 \
+      --json tagName,isLatest --jq 'map(select(.isLatest))[0].tagName // ""')
 asset=$(gh release view "$tag" --repo openwrt-iac/uapi \
         --json assets --jq '.assets[].name | select(test("^uapi-.*\\.apk$"))' 2>/dev/null | head -1)
 apk_pin=$(printf '%s' "$asset" | sed -n 's/^uapi-\(.*\)\.apk$/\1/p')
@@ -50,8 +51,8 @@ printf '%s' "$versions_json" | python3 scripts/render_picker.py older  > "$older
 # The Terraform provider's own version, for the HCL snippet on the landing page. It tracks uapi's
 # majors, so a hand-written constraint goes wrong exactly when uapi's does: "~> 2.1" still
 # resolves today, but it excludes the provider's next major outright.
-provider_tag=$(gh release list --repo openwrt-iac/terraform-provider-uapi \
-               --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
+provider_tag=$(gh release list --repo openwrt-iac/terraform-provider-uapi --exclude-pre-releases \
+               --exclude-drafts --limit 100 --json tagName,isLatest --jq 'map(select(.isLatest))[0].tagName // ""')
 UAPI_PROVIDER_CONSTRAINT=$(printf '%s' "$provider_tag" \
                            | sed -n 's/^v\([0-9]\+\)\.\([0-9]\+\)\..*$/~> \1.\2/p')
 [ -n "$UAPI_PROVIDER_CONSTRAINT" ] || { echo "[facts] could not derive the provider constraint from '$provider_tag'" >&2; exit 1; }
