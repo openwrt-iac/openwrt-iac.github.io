@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi security model - uapi 3.4.0 docs</title>
+<title>uapi security model - uapi 3.5.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.4.0 / uapi security model</p>
+       <a href="/uapi/docs/">docs</a> / 3.5.0 / uapi security model</p>
   </div>
 </header>
 
@@ -101,7 +101,8 @@
    constant-time (byte-XOR-accumulate via <code>values.constant_time_equals</code>)
    and the authorize loop iterates every token regardless of where the
    match occurs, so the dominant timing channel is closed. Pre-match work
-   (the <code>t.salt == null || t.hash == null</code> skip, hash-function runtime itself) and
+   (the <code>t.salt == null || t.hash == null</code> skip, hash-function runtime itself)
+   and
    downstream paths (expiry check, CIDR match, scope lookup) are not
    constant-time. A determined attacker with low-latency local access
    could in principle still extract bits, but tokens are 128 random bits
@@ -182,48 +183,80 @@
 </tbody>
 </table>
 <h3 id="scopes-that-grant-root">Scopes that grant root</h3>
-<p>Some write scopes let the holder run code as root directly, or choose a file that a root daemon
+<p>Some write scopes let the holder run code as root directly, or choose a file
+that a root daemon
 writes. Grant each one as if it were <code>*:rw</code>:</p>
 <ul>
 <li><code>system:cron_jobs:rw</code> adds a crontab line, and crond runs its command as root.</li>
 <li><code>system:authorized_keys:rw</code> adds an SSH key that logs in as root.</li>
 <li><code>system:password:rw</code> sets the root password.</li>
-<li><code>packages:installed:rw</code> installs a package, and its install script runs as root.</li>
-<li><code>uhttpd:instances:rw</code> sets the document root and the CGI, Lua and ucode prefixes of an
-  instance, so it chooses which programs uhttpd runs as root and which files it serves.</li>
-<li><code>dhcp:odhcpd:rw</code> sets <code>leasetrigger</code>, a program that odhcpd runs as root on each lease change.</li>
-<li><code>dhcp:dnsmasq:rw</code> sets <code>leasefile</code>, a file that dnsmasq opens as root and rewrites with its
+<li><code>packages:installed:rw</code> installs a package, and its install script runs as
+  root.</li>
+<li><code>uhttpd:instances:rw</code> sets the document root and the CGI, Lua and ucode
+  prefixes of an
+  instance, so it chooses which programs uhttpd runs as root and which files it
+  serves.</li>
+<li><code>dhcp:odhcpd:rw</code> sets <code>leasetrigger</code>, a program that odhcpd runs as root on
+  each lease change.</li>
+<li><code>dhcp:dnsmasq:rw</code> sets <code>leasefile</code>, a file that dnsmasq opens as root and
+  rewrites with its
   leases.</li>
 </ul>
-<p>The list is not complete: several uci options name a script that a daemon runs as root.
-A parent scope includes them, so <code>system:rw</code> grants the first three. Deepest match wins,
-so <code>system:rw</code> with <code>system:cron_jobs:ro</code> keeps the system writes and denies cron writes.</p>
-<p>One read scope deserves the same care. <code>system:cron_jobs:ro</code>, and every scope above it up
-to <code>*:ro</code>, returns each root crontab command in full, and a command can carry a credential.
-Keep secrets in a 0600 file that the command reads, rather than on the crontab line.</p>
+<p>The list is not complete: several uci options name a script that a daemon runs
+as root.
+A parent scope includes them, so <code>system:rw</code> grants the first three. Deepest
+match wins,
+so <code>system:rw</code> with <code>system:cron_jobs:ro</code> keeps the system writes and denies
+cron writes.</p>
+<p>One read scope deserves the same care. <code>system:cron_jobs:ro</code>, and every scope
+above it up
+to <code>*:ro</code>, returns each root crontab command in full, and a command can carry a
+credential.
+Keep secrets in a 0600 file that the command reads, rather than on the crontab
+line.</p>
 <h3 id="values-that-a-daemon-reads-later">Values that a daemon reads later</h3>
-<p>An init script copies some stored values into a daemon's config file or into a shell command
-without quoting, and root reads the result. In the curated values that an audit for 3.2.0 found,
-uapi refuses the characters that end the line or the argument, so that a value cannot add a
-directive, a command or a command argument. The check runs when a write goes through uapi, so a
+<p>An init script copies some stored values into a daemon's config file or into a
+shell command
+without quoting, and root reads the result. In the curated values that an audit
+for 3.2.0 found,
+uapi refuses the characters that end the line or the argument, so that a value
+cannot add a
+directive, a command or a command argument. The check runs when a write goes
+through uapi, so a
 value that LuCI, <code>uci</code> or another writer stored stays until a write replaces it.</p>
-<p><code>/raw/</code> checks a value only for what uci can store, never for what a daemon reads.
-<code>raw:&lt;package&gt;:rw</code> with a domain scope of that package counts as a root scope for each package
+<p><code>/raw/</code> checks a value only for what uci can store, never for what a daemon
+reads.
+<code>raw:&lt;package&gt;:rw</code> with a domain scope of that package counts as a root scope
+for each package
 that a root daemon or script reads.</p>
-<p>uapi checks the dnsmasq config after a reload with <code>dnsmasq --test</code>, as root and outside the jail
-that procd gives dnsmasq, so a <code>conf-script</code> in that config runs there too. Only <code>raw:dhcp:rw</code> with
+<p>uapi checks the dnsmasq config after a reload with <code>dnsmasq --test</code>, as root and
+outside the jail
+that procd gives dnsmasq, so a <code>conf-script</code> in that config runs there too. Only
+<code>raw:dhcp:rw</code> with
 a domain scope of <code>dhcp</code>, a root scope already, can write such a line.</p>
 <h3 id="audit-consequence">Audit consequence</h3>
 <p>The token <em>name</em> is logged on every audit line. Tokens should be named for
-their owner (<code>ci-bot</code>, <code>terraform-prod</code>, <code>alice-laptop</code>) so the audit log
+their owner (<code>ci_bot</code>, <code>terraform_prod</code>, <code>alice_laptop</code>) so the audit log
 identifies the responsible party, not a hash.</p>
 <h2 id="authentication-design-exclusions">Authentication-design exclusions</h2>
-<p>uapi defends the surface above with bearer tokens deliberately, not by accident. Two design candidates that would seem natural but are explicitly rejected:</p>
+<p>uapi defends the surface above with bearer tokens deliberately, not by accident.
+Two design candidates that would seem natural but are explicitly rejected:</p>
 <ul>
-<li><strong>No rpcd sessions.</strong> The OpenWrt rpcd session model (login endpoint returning a session id, session expiry, ubus <code>session.*</code> namespace) is well-trodden by LuCI but adds a runtime store, session-eviction machinery, and a separate failure mode for "session expired vs token revoked." uapi's bearer-token model is simpler at the cost of forcing the operator to mint tokens out of band.</li>
-<li><strong>No HTTP login endpoint.</strong> Tokens are minted via the <code>uapi-token</code> CLI on the router or via <code>POST /tokens</code> (which itself requires a token with <code>uapi:tokens:rw</code>). There is no bootstrap "POST /login with username+password to get a token" path. The first token is always minted locally; everything after composes from that.</li>
+<li><strong>No rpcd sessions.</strong> The OpenWrt rpcd session model (login endpoint returning
+  a session id, session expiry, ubus <code>session.*</code> namespace) is well-trodden by
+  LuCI but adds a runtime store, session-eviction machinery, and a separate
+  failure mode for "session expired vs token revoked." uapi's bearer-token model
+  is simpler at the cost of forcing the operator to mint tokens out of band.</li>
+<li><strong>No HTTP login endpoint.</strong> Tokens are minted via the <code>uapi-token</code> CLI on the
+  router or via <code>POST /tokens</code> (which itself requires a token with
+  <code>uapi:tokens:rw</code>). There is no bootstrap "POST /login with username+password
+  to get a token" path. The first token is always minted locally; everything
+  after composes from that.</li>
 </ul>
-<p>Both could be added without breaking the wire surface (new endpoints are non-breaking). The deliberate exclusion is to keep the security model auditable as "the set of tokens in <code>/etc/config/uapi</code>" with no second authentication path to reason about.</p>
+<p>Both could be added without breaking the wire surface (new endpoints are
+non-breaking). The deliberate exclusion is to keep the security model auditable
+as "the set of tokens in <code>/etc/config/uapi</code>" with no second authentication path
+to reason about.</p>
 <h2 id="public-endpoints">Public endpoints</h2>
 <p>Three endpoints skip the bearer-token requirement:</p>
 <ul>
@@ -231,11 +264,59 @@ identifies the responsible party, not a hash.</p>
 <li><code>GET /openapi.json</code>: spec discovery.</li>
 <li><code>GET /schema/*</code>: per-resource JSON Schema (codegen input).</li>
 </ul>
-<p>All three still pass the TLS check; only the bearer requirement is waived. Plain HTTP from a non-loopback source still returns <code>403 tls_required</code> before the public-endpoint short-circuit runs.</p>
-<p>uapi reads and parses the body of a POST, PUT or PATCH before the bearer check, on every path. <code>json()</code> takes about 1.6 KB for each object or array, so 1 MiB of <code>[{},{},...]</code> took 560 MB. A body over 256 KiB, sent with a <code>Content-Length</code> or chunked, or a body with more than 2000 <code>{</code> and <code>[</code> characters, answers <code>413 payload_too_large</code> before the parse, which keeps the parse of a body without a token under about 13 MB (measured with ucode 2026.01.16 on x86_64). A <code>Content-Length</code> that uapi does not read as a whole number from 0 to 262144 answers 413 too, because uhttpd reads such a value in another way: on a 64-bit router it wraps a value of 2^32 or more. uhttpd hands a chunked body over de-chunked and with no <code>Content-Length</code>, and uapi reads it until uhttpd closes the pipe after the last chunk. uapi joins the parts of a body as it reads them, so a body that arrives a byte at a time takes about as much memory as one that arrives whole.</p>
-<p>uhttpd parses what the request process leaves unread as the next request on the connection. So before it answers, on every path and the public endpoints included, uapi reads and drops what is left of every body that uhttpd hands over. uhttpd does not hand over some bodies whole, and uapi cannot drop what follows them: uhttpd ends a chunked body at a chunk extension, parses a trailer after the last chunk as a new request, and reads a <code>Transfer-Encoding</code> value other than <code>chunked</code> in lower case, such as <code>Chunked</code>, as no body.</p>
-<p>A body has to arrive in full within 10 s of the start of the request process. uhttpd hands it over a blocking pipe, where a process that waits for a body that does not come holds one of the <code>max_requests</code> of uhttpd, 3 by default and shared with LuCI, until the script timeout of uhttpd, 60 s by default. uapi makes the pipe non-blocking with <code>ucode-mod-io</code>. So a POST, PUT or PATCH whose client declares a body and sends less, sends it too slowly, or does not send the last chunk of a chunked body, gets <code>400 bad_request</code> after about 10 s, before the bearer check, and syslog gets a <code>uapi-body-deadline</code> line (<code>docs/operations.md</code>). The drop of what is left of a body stops at the same deadline. So a request that answers without reading its body gets its normal answer 10 s after it started when that body does not arrive, and logs the same line: a 413, a POST to <code>/healthz</code>, or a GET or DELETE with a declared body. A DELETE has then already been applied. uapi checks the deadline when it finds the pipe empty, so that a drop after a write that took longer still reads a body that has arrived. A body that keeps arriving faster than uapi drops it is therefore bounded by its <code>Content-Length</code> or its last chunk and by the script timeout, not by the deadline. The deadline bounds each request, not how many a client opens one after another. Without <code>ucode-mod-io</code>, uapi reads a body from the blocking pipe with no deadline, and logs that once when uhttpd starts.</p>
-<p>uhttpd keeps the connection open after every answer of the handler, and nothing that uapi sends makes it close the connection. After a body that missed the deadline, uhttpd parses what the client sends next on the connection, the rest of that body included, as a new request, and answers it. For a client on its own connection this changes nothing that it could not do with a request of its own. It matters behind a reverse proxy that streams request bodies to uhttpd and reuses its connections to uhttpd for other clients: the rest of a late body would reach uhttpd as a request, and its answer would go to the request that the proxy sends next on that connection. Such a proxy should buffer each request body before it forwards it, as nginx does by default, or close a connection to uhttpd on which it did not finish sending a request.</p>
+<p>All three still pass the TLS check; only the bearer requirement is waived. Plain
+HTTP from a non-loopback source still returns <code>403 tls_required</code> before the
+public-endpoint short-circuit runs.</p>
+<p>uapi reads and parses the body of a POST, PUT or PATCH before the bearer check,
+on every path. <code>json()</code> takes about 1.6 KB for each object or array, so 1 MiB of
+<code>[{},{},...]</code> took 560 MB. A body over 256 KiB, sent with a <code>Content-Length</code> or
+chunked, or a body with more than 2000 <code>{</code> and <code>[</code> characters, answers <code>413
+payload_too_large</code> before the parse, which keeps the parse of a body without a
+token under about 13 MB (measured with ucode 2026.01.16 on x86_64). A
+<code>Content-Length</code> that uapi does not read as a whole number from 0 to 262144
+answers 413 too, because uhttpd reads such a value in another way: on a 64-bit
+router it wraps a value of 2^32 or more. uhttpd hands a chunked body over
+de-chunked and with no <code>Content-Length</code>, and uapi reads it until uhttpd closes
+the pipe after the last chunk. uapi joins the parts of a body as it reads them,
+so a body that arrives a byte at a time takes about as much memory as one that
+arrives whole.</p>
+<p>uhttpd parses what the request process leaves unread as the next request on the
+connection. So before it answers, on every path and the public endpoints
+included, uapi reads and drops what is left of every body that uhttpd hands
+over. uhttpd does not hand over some bodies whole, and uapi cannot drop what
+follows them: uhttpd ends a chunked body at a chunk extension, parses a trailer
+after the last chunk as a new request, and reads a <code>Transfer-Encoding</code> value
+other than <code>chunked</code> in lower case, such as <code>Chunked</code>, as no body.</p>
+<p>A body has to arrive in full within 10 s of the start of the request process.
+uhttpd hands it over a blocking pipe, where a process that waits for a body that
+does not come holds one of the <code>max_requests</code> of uhttpd, 3 by default and shared
+with LuCI, until the script timeout of uhttpd, 60 s by default. uapi makes the
+pipe non-blocking with <code>ucode-mod-io</code>. So a POST, PUT or PATCH whose client
+declares a body and sends less, sends it too slowly, or does not send the last
+chunk of a chunked body, gets <code>400 bad_request</code> after about 10 s, before the
+bearer check, and syslog gets a <code>uapi-body-deadline</code> line
+(<code>docs/operations.md</code>). The drop of what is left of a body stops at the same
+deadline. So a request that answers without reading its body gets its normal
+answer 10 s after it started when that body does not arrive, and logs the same
+line: a 413, a POST to <code>/healthz</code>, or a GET or DELETE with a declared body. A
+DELETE has then already been applied. uapi checks the deadline when it finds the
+pipe empty, so that a drop after a write that took longer still reads a body
+that has arrived. A body that keeps arriving faster than uapi drops it is
+therefore bounded by its <code>Content-Length</code> or its last chunk and by the script
+timeout, not by the deadline. The deadline bounds each request, not how many a
+client opens one after another. Without <code>ucode-mod-io</code>, uapi reads a body from
+the blocking pipe with no deadline, and logs that once when uhttpd starts.</p>
+<p>uhttpd keeps the connection open after every answer of the handler, and nothing
+that uapi sends makes it close the connection. After a body that missed the
+deadline, uhttpd parses what the client sends next on the connection, the rest
+of that body included, as a new request, and answers it. For a client on its own
+connection this changes nothing that it could not do with a request of its own.
+It matters behind a reverse proxy that streams request bodies to uhttpd and
+reuses its connections to uhttpd for other clients: the rest of a late body
+would reach uhttpd as a request, and its answer would go to the request that the
+proxy sends next on that connection. Such a proxy should buffer each request
+body before it forwards it, as nginx does by default, or close a connection to
+uhttpd on which it did not finish sending a request.</p>
 <h2 id="tls-posture">TLS posture</h2>
 <ul>
 <li><code>uhttpd</code> serves both HTTP and HTTPS. <code>tls_check()</code> permits HTTP only
@@ -318,9 +399,11 @@ uapi &lt;request_id&gt; -             ERROR &lt;code&gt; &lt;method&gt; &lt;path
 <li><strong>Pin tokens to source CIDRs.</strong> <code>allowed_cidrs</code> defends against token
    theft from outside the management network. Prefixes of either family are
    accepted and a list may mix them. A caller is matched only against entries of
-   its own family, so on a dual-stack router <code>0.0.0.0/0</code> alone still denies every
+   its own family, so on a dual-stack router <code>0.0.0.0/0</code> alone still denies
+   every
    IPv6 caller; "any address" means listing both <code>0.0.0.0/0</code> and <code>::/0</code>. That
-   asymmetry is deliberate: an allowlist that silently widened to a second address
+   asymmetry is deliberate: an allowlist that silently widened to a second
+   address
    family would be a worse failure than one that denies.</li>
 <li><strong>Set token expiry.</strong> <code>--expires-in 90d</code> on every minted token forces
    rotation. The HTTP rotation endpoint (<code>POST /tokens</code>, which takes
@@ -339,9 +422,12 @@ required"</code>) - never sensitive values.</p>
   name and request id, never the password).
 - TLS certificate or key material.</p>
 <h2 id="reporting-issues">Reporting issues</h2>
-<p>Do not file a security issue as a public GitHub issue. Use GitHub's private vulnerability
-reporting, linked from <a href="../SECURITY.md"><code>SECURITY.md</code></a>, which also sets out what counts as a
-vulnerability in a daemon that is root-privileged by design, and which of the decisions above
+<p>Do not file a security issue as a public GitHub issue. Use GitHub's private
+vulnerability
+reporting, linked from <a href="../SECURITY.md"><code>SECURITY.md</code></a>, which also sets out what
+counts as a
+vulnerability in a daemon that is root-privileged by design, and which of the
+decisions above
 are recorded choices rather than defects.</p>
   </div>
 </section>
@@ -349,8 +435,8 @@ are recorded choices rather than defects.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/security.md</code> at tag <code>v3.4.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.4.0/docs/security.md">repository</a>, never here.
+      Rendered from <code>docs/security.md</code> at tag <code>v3.5.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.5.0/docs/security.md">repository</a>, never here.
     </p>
   </div>
 </footer>

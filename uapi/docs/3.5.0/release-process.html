@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi release process - uapi 3.4.0 docs</title>
+<title>uapi release process - uapi 3.5.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.4.0 / uapi release process</p>
+       <a href="/uapi/docs/">docs</a> / 3.5.0 / uapi release process</p>
   </div>
 </header>
 
@@ -41,9 +41,11 @@ not prove arch-neutrality, despite what this said until 2.5.0: it
 compares no digests and has no x86_64 leg to compare against. It fails
 the release on a missing per-arch SDK pin, a tarball that does not match
 its pin, a cross-build that breaks under any of the three, or a build
-that produces no <code>.apk</code> - which is what 2.4.1 actually relied on. Per-arch SDK tarball sha256 lives in
+that produces no <code>.apk</code> - which is what 2.4.1 actually relied on. Per-arch SDK
+tarball sha256 lives in
 <code>build/sdk.sha256</code>; refresh those lines whenever <code>OPENWRT_VERSION</code> bumps
-(URLs are in the matrix in <code>.github/workflows/ci.yml</code>).</p>
+(the matrix in <code>.github/workflows/ci.yml</code> names the targets, and
+<code>tools/openwrt-sdk.sh</code> resolves each URL from the pin).</p>
 <h3 id="pre-tag-arch-validation">Pre-tag arch validation</h3>
 <p><code>verify-arch-build</code> also accepts <code>workflow_dispatch</code>, so you can validate
 the SDK pins against a candidate without tagging:</p>
@@ -63,7 +65,8 @@ it also upgrades from 3.2.0, the last release whose package shipped
 <h2 id="versioning">Versioning</h2>
 <p><code>VERSION</code> at the repo root drives every other version string:</p>
 <ul>
-<li><code>build/openwrt/uapi/Makefile</code> reads it via <code>$(shell sed 's/-/_/g' files/VERSION)</code>.</li>
+<li><code>build/openwrt/uapi/Makefile</code> reads it via <code>$(shell sed 's/-/_/g'
+  files/VERSION)</code>.</li>
 <li><code>build/gen_openapi.uc</code> reads it and stamps <code>info.version</code>.</li>
 <li><code>src/main.uc</code> reads it at parent VM startup; <code>/healthz</code> returns it.</li>
 <li>CI verifies the tag's signature, not its name: nothing compares the pushed
@@ -93,6 +96,32 @@ nearly rode along with the bug fix it belonged to.</p>
 <p>Record the outcome even when it is empty. "Swept, nothing eligible" is worth
 saying, because the next reader cannot tell a sweep that found nothing from a
 sweep that never happened.</p>
+<h2 id="major-preparation-branch">Major preparation branch</h2>
+<p>A major's breaking work lands on a preparation branch cut from <code>main</code> (today
+<code>v4</code>), not on <code>main</code> itself. Breaking-change PRs target the preparation
+branch. Additive and internal PRs keep targeting <code>main</code> and can ship in
+minors while the major is in flight.</p>
+<ul>
+<li>The preparation branch carries the same required checks as <code>main</code>: <code>unit</code>,
+  <code>lint</code>, <code>integration</code>, <code>entry</code> and <code>package</code>, with the branch up to date
+  before the merge (strict). Create the ruleset when the branch is created,
+  by copying the <code>main</code> ruleset and setting its name to
+  <code>&lt;branch&gt;: required checks</code> and its <code>conditions.ref_name.include</code> to
+  <code>["refs/heads/&lt;branch&gt;"]</code>. Every future major preparation branch gets the
+  same ruleset. The two rulesets differ in one thing: the <code>main</code> ruleset has
+  no bypass actor, so nobody can bypass it, and the preparation branch
+  ruleset lets the repository admin role bypass it (<code>actor_type:
+  "RepositoryRole"</code>, <code>actor_id: 5</code>, <code>bypass_mode: "always"</code>). The checks stay
+  required on pull requests to the branch, and an admin can push the branch
+  directly for the rebases below (without the bypass, a ruleset on a branch
+  rejects direct pushes).</li>
+<li>Rebase the preparation branch onto <code>main</code> after every merge into <code>main</code>,
+  so breaking PRs start from a current base and conflicts stay small.</li>
+<li>Until the release, the preparation branch still serves the current API
+  prefix. The mount move is the last commit before the rc tag.</li>
+<li>At release time: rebase the preparation branch onto <code>main</code>, merge it into
+  <code>main</code>, then run the rc flow below.</li>
+</ul>
 <h2 id="release-flow">Release flow</h2>
 <h3 id="major-versions-ship-as-rc-first">Major versions ship as <code>-rc</code> first</h3>
 <p>For any MAJOR bump, tag <code>vX.0.0-rc1</code> (or <code>-rc2</code>, etc.) BEFORE the final
@@ -136,9 +165,9 @@ polish".</p>
 <li><strong>Open PR, get CI green</strong>: lint + unit + coverage gate + integration +
    soak (RSS/fd growth thresholds) + bench, and the <code>package</code> job, which the
    change of <code>VERSION</code> triggers, so the APK and the upgrades from 3.2.0 are
-   tested before the tag exists. <code>package</code> is not a required check yet, so
-   a red <code>package</code> does not block the merge: read its result. The bench
-   measures and reports per-endpoint p99; it does not gate, because no
+   tested before the tag exists. <code>package</code> is a required check, so a red
+   <code>package</code> blocks the merge. The bench measures and reports per-endpoint
+   p99; it does not gate, because no
    baseline is committed. Read the numbers in the run log or the <code>bench-run</code>
    artifact if a release is expected to move latency.</li>
 <li><strong>Merge to main</strong>.</li>
@@ -198,33 +227,54 @@ gh release upload v2.0.0 build/sbom.spdx.json --clobber
 built APK's verification sha256. Operators using SBOM-aware deployment
 tooling (cosign, syft, etc.) can consume it directly.</p>
 <h2 id="changelog">Changelog</h2>
-<p><code>CHANGELOG.md</code> follows <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>: an
-<code>## [Unreleased]</code> section at the top, and one section per release below it. The process is the
+<p><code>CHANGELOG.md</code> follows <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>:
+an
+<code>## [Unreleased]</code> section at the top, and one section per release below it. The
+process is the
 one Grafana Mimir uses: each PR writes its own entry, and CI checks that it did.</p>
-<p><strong>Every PR records its change in the same PR.</strong> It adds an entry under <code>## [Unreleased]</code>, in the
-heading that fits: <code>Added</code>, <code>Changed</code>, <code>Deprecated</code>, <code>Removed</code>, <code>Fixed</code>, <code>Security</code>, or
-<code>Internal</code> for release and build machinery. The entry ends with the PR number in parentheses,
-for example <code>(#193)</code>. <code>.github/workflows/changelog.yml</code> runs <code>scripts/changelog-has-entry.sh</code>
+<p><strong>Every PR records its change in the same PR.</strong> It adds an entry under <code>##
+[Unreleased]</code>, in the
+heading that fits: <code>Added</code>, <code>Changed</code>, <code>Deprecated</code>, <code>Removed</code>, <code>Fixed</code>,
+<code>Security</code>, or
+<code>Internal</code> for release and build machinery. The entry ends with the PR number in
+parentheses,
+for example <code>(#193)</code>. <code>.github/workflows/changelog.yml</code> runs
+<code>scripts/changelog-has-entry.sh</code>
 and fails the PR when no entry under <code>## [Unreleased]</code> carries its number.</p>
-<p><strong>An entry is needed for every change that someone outside the repo can see:</strong> the wire
-surface, the behavior on the router, the package, or the release artifacts (APK, SBOM, GitHub
-Release). A PR that changes none of these takes the <code>changelog-not-needed</code> label instead, and
-the check skips it. That covers docs, tests, CI that changes no artifact, refactors, and release
-PRs.</p>
-<p><strong>The entry says why, not only what.</strong> It names the defect or the need, what changed on the
-wire, and what a client must do, if anything. A breaking change opens with <code>BREAKING:</code>. A
-tightening under a carve-out in <code>docs/versioning.md</code> names the carve-out and says how loudly it
-fails. This is why entries are not generated from PR titles, as release-please does in Grafana
+<p><strong>An entry is needed for every change that someone outside the repo can see:</strong>
+the wire
+surface, the behavior on the router, the package, or the release artifacts (APK,
+SBOM, GitHub
+Release). A PR that changes none of these takes the <code>changelog-not-needed</code> label
+instead. The
+<code>entry</code> job still runs on that PR, reads the label from the API and passes. That
+covers docs,
+tests, CI that changes no artifact, refactors, and release PRs.</p>
+<p><strong>The entry says why, not only what.</strong> It names the defect or the need, what
+changed on the
+wire, and what a client must do, if anything. A breaking change opens with
+<code>BREAKING:</code>. A
+tightening under a carve-out in <code>docs/versioning.md</code> names the carve-out and
+says how loudly it
+fails. This is why entries are not generated from PR titles, as release-please
+does in Grafana
 Loki and Alloy: a title cannot carry that.</p>
-<p><strong>The PR number exists only once the PR does.</strong> Either open the PR and then push the entry, or
-predict the number with <code>scripts/next-pr-number.sh</code> before you open it. Issues and PRs share one
-counter, so the guess is wrong if an issue opens in between, and the check then fails until the
+<p><strong>The PR number exists only once the PR does.</strong> Either open the PR and then push
+the entry, or
+predict the number with <code>scripts/next-pr-number.sh</code> before you open it. Issues
+and PRs share one
+counter, so the guess is wrong if an issue opens in between, and the check then
+fails until the
 entry carries the real number.</p>
-<p><strong>At release time,</strong> <code>scripts/changelog-missing.sh &lt;previous-tag&gt;</code> lists every PR merged into
-<code>main</code> since that tag that has neither an entry nor the label. It must print nothing. Step 3
-above then turns <code>## [Unreleased]</code> into the release section, and <code>scripts/release-notes.sh</code>
+<p><strong>At release time,</strong> <code>scripts/changelog-missing.sh &lt;previous-tag&gt;</code> lists every
+PR merged into
+<code>main</code> since that tag that has neither an entry nor the label. It must print
+nothing. Step 3
+above then turns <code>## [Unreleased]</code> into the release section, and
+<code>scripts/release-notes.sh</code>
 makes that section the GitHub Release body.</p>
-<p>Before this process, entries were written at release time from memory. Between 3.0.0 and the
+<p>Before this process, entries were written at release time from memory. Between
+3.0.0 and the
 first PR the check covered, nine PRs merged and none of them added an entry.</p>
 <h2 id="pre-release-verification-checklist">Pre-release verification checklist</h2>
 <p>Before tagging:</p>
@@ -243,8 +293,10 @@ first PR the check covered, nine PRs merged and none of them added an entry.</p>
   without it. Grep the docs for the version being cut and for the one before
   it.</li>
 <li>[ ] <code>make test coverage</code> green.</li>
-<li>[ ] CI green on the branch being tagged, for the exact commit that will be tagged.
-  <code>main</code> for a release off the current major, <code>release/&lt;major&gt;.&lt;minor&gt;.x</code> for a patch on an
+<li>[ ] CI green on the branch being tagged, for the exact commit that will be
+  tagged.
+  <code>main</code> for a release off the current major, <code>release/&lt;major&gt;.&lt;minor&gt;.x</code> for a
+  patch on an
   older one. Both are built on push.</li>
 <li>[ ] <code>.github/release-signers.asc</code> contains your GPG public key block.</li>
 <li>[ ] <code>build/sdk.sha256</code> pins ALL four arch SDKs at the right
@@ -258,10 +310,14 @@ first PR the check covered, nine PRs merged and none of them added an entry.</p>
 <li>[ ] verify-arch-build matrix completed (all three non-x86 arches green).</li>
 <li>[ ] APK attached to the GitHub Release.</li>
 <li>[ ] <strong>Stable releases only</strong>: trigger <code>gh workflow run publish.yml --repo
-      openwrt-iac/openwrt-iac.github.io</code> (or wait for the nightly schedule) and confirm
-      <code>apk update</code> against <code>openwrt-iac.github.io/feed/...</code> finds the new version. For an RC,
-      confirm the opposite instead, that <code>apk policy uapi</code> still offers the previous stable:
-      the aggregator filters prereleases at source, so an RC reaching the feed is the bug.</li>
+      openwrt-iac/openwrt-iac.github.io</code> (or wait for the nightly schedule) and
+      confirm
+      <code>apk update</code> against <code>openwrt-iac.github.io/feed/...</code> finds the new
+      version. For an RC,
+      confirm the opposite instead, that <code>apk policy uapi</code> still offers the
+      previous stable:
+      the aggregator filters prereleases at source, so an RC reaching the feed
+      is the bug.</li>
 <li>[ ] Smoke install on a real router works.</li>
 <li>[ ] SBOM attached.</li>
 </ul>
@@ -301,8 +357,8 @@ architectural intent is that it should not be.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/release-process.md</code> at tag <code>v3.4.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.4.0/docs/release-process.md">repository</a>, never here.
+      Rendered from <code>docs/release-process.md</code> at tag <code>v3.5.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.5.0/docs/release-process.md">repository</a>, never here.
     </p>
   </div>
 </footer>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Commit-confirmed apply (deferred design) - uapi 3.4.0 docs</title>
+<title>Commit-confirmed apply (deferred design) - uapi 3.5.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.4.0 / Commit-confirmed apply (deferred design)</p>
+       <a href="/uapi/docs/">docs</a> / 3.5.0 / Commit-confirmed apply (deferred design)</p>
   </div>
 </header>
 
@@ -48,7 +48,8 @@ It was deferred for contract-commitment reasons, not because it is broken:</p>
   into v2 would have cost a major bump to correct. Now settled: see "Authz
   model (decided)" below, which departs from rc1 on both arming and ack.</li>
 <li><strong>No viable path for an IaC tool to drive it.</strong> Established after the fact and
-  the most substantive of the three; see "Can Terraform actually use this" below.
+  the most substantive of the three; see "Can Terraform actually use this"
+  below.
   In short: the plugin protocol has no apply-scoped hook, the one lifecycle that
   looks like it fits closes its window mid-apply, and the per-write form is not
   merely unusable by a multi-resource apply but corrupts state when tried.</li>
@@ -89,14 +90,17 @@ state-divergence objection that killed the v1-era design).</p>
 <p>The per-write form cannot wrap a whole <code>terraform apply</code>: a DAG apply is N
 isolated RPCs with no apply-level hook, and only one window can exist at a time.
 A second <code>?confirm</code> write does not mint a second window and does not degrade
-gracefully: <code>stage</code> refuses with <code>already_armed</code>, uapi returns <code>409</code>, and because
+gracefully: <code>stage</code> refuses with <code>already_armed</code>, uapi returns <code>409</code>, and
+because
 arming happens before the commit the refused write's own change is rolled back
 too. So an apply that put <code>?confirm</code> on every write dies at resource 2, and
 resource 1 is then auto-reverted at its deadline, leaving Terraform state
-claiming a resource the box no longer has. (An earlier revision of this file said
+claiming a resource the box no longer has. (An earlier revision of this file
+said
 each <code>?confirm</code> "mints a separate last-writer-wins window". That was never true
 of the mechanism; the flock in Architecture above is the accurate description,
-and the rc1 code in <code>a85a5cd</code> behaves as described here.) The Terraform-useful shape is <code>apply-confirm</code>'s
+and the rc1 code in <code>a85a5cd</code> behaves as described here.) The Terraform-useful
+shape is <code>apply-confirm</code>'s
 <code>stage</code> primitive exposed over HTTP so a wrapper can arm once, run the apply,
 then ack once. Locked design (see <code>docs/roadmap.md</code>):</p>
 <ul>
@@ -171,22 +175,28 @@ be scoped into whichever minor its consumer lands in.</p>
 <p>The question that matters most, and the one asked last. Measured against the
 plugin protocol with a probe provider rather than reasoned from the docs.</p>
 <p><strong>No provider hook spans an apply.</strong> <code>tfplugin6.proto</code> has schema/validate/
-configure, managed-resource CRUD, ephemeral Open/Renew/Close, list, functions and
-<code>StopProvider</code>, and nothing apply-scoped. <code>ConfigureProvider</code> is not a start hook:
+configure, managed-resource CRUD, ephemeral Open/Renew/Close, list, functions
+and
+<code>StopProvider</code>, and nothing apply-scoped. <code>ConfigureProvider</code> is not a start
+hook:
 it fires once per graph walk, so once during plan and again during apply, in two
 different processes, with no paired end call. Teardown is a process kill, not an
 RPC. <code>terraform-plugin-framework</code> exposes no shutdown hook of its own.</p>
 <p><strong>Ephemeral resources look like the answer and are not.</strong> They do give
 Open / Renew / Close with a framework-honoured <code>RenewAt</code>, and a probe confirmed
 renewals firing every 2s across a 9s apply, so the keep-alive half is sound. The
-scoping is what breaks it: the close node is wired to the ephemeral resource's own
+scoping is what breaks it: the close node is wired to the ephemeral resource's
+own
 dependents, not to the end of the walk, so the window closes when that chain
 finishes. Measured, with an unrelated 6s resource in the same apply: Close at
-21.2s, the unrelated resource still writing until 27.2s. On a <strong>successful</strong> apply
+21.2s, the unrelated resource still writing until 27.2s. On a <strong>successful</strong>
+apply
 the ack would therefore be sent while other resources are still being written,
 which is worse than having no window, because it reports protection it is not
-giving. A bare unreferenced <code>ephemeral</code> block is worse again: Open and Close both
-complete before any managed resource applies at all, so it protects nothing while
+giving. A bare unreferenced <code>ephemeral</code> block is worse again: Open and Close
+both
+complete before any managed resource applies at all, so it protects nothing
+while
 looking like it worked. Whole-apply coverage needs <code>depends_on</code> on every managed
 resource in every module, which a provider cannot enforce and where one omission
 silently drops that resource outside the net.</p>
@@ -195,41 +205,53 @@ silently drops that resource outside the net.</p>
 would write a rollback timer to a router during a read-only plan. And <code>Close</code> is
 not guaranteed: a failing resource in the chain produced no Close, <code>SIGINT</code>
 produced no Close and stopped renewals, and Terraform's own straggler sweep
-carries a TODO admitting the gap. That last one cuts uapi's way (no ack means the
+carries a TODO admitting the gap. That last one cuts uapi's way (no ack means
+the
 box reverts, which is the desired outcome) but it means the mechanism can only
-ever be correct under two assumptions the protocol forces: the arm may fire during
+ever be correct under two assumptions the protocol forces: the arm may fire
+during
 a plan, and the ack may never arrive.</p>
 <p><strong>Conclusion.</strong> A provider cannot drive arm-and-confirm correctly. If this ships
 it is operator-driven, and the per-write half should not ship at all: it has no
-consumer named anywhere in this repo, it cannot serve a multi-resource apply, and
+consumer named anywhere in this repo, it cannot serve a multi-resource apply,
+and
 attempting one leaves Terraform state describing a box that reverted underneath
 it. The standalone arm is the only shape with a plausible consumer.</p>
 <h2 id="what-the-prior-art-settles">What the prior art settles</h2>
-<p>Confirmed commit is old, and the two things uapi got right are the two things the
+<p>Confirmed commit is old, and the two things uapi got right are the two things
+the
 standards took a revision to learn.</p>
 <p>NETCONF 1.0 (RFC 4741) bound the confirming commit to the arming session, so a
-transport blip reverted. RFC 6241 added <code>&lt;persist&gt;</code> / <code>&lt;persist-id&gt;</code> precisely so
-the confirm could arrive on a different session, and RESTCONF's authors hit uapi's
+transport blip reverted. RFC 6241 added <code>&lt;persist&gt;</code> / <code>&lt;persist-id&gt;</code> precisely
+so
+the confirm could arrive on a different session, and RESTCONF's authors hit
+uapi's
 exact problem when mapping it to HTTP: a request-per-operation transport has no
-session to bind to, so the token is not a convenience, it is the mechanism. uapi's
+session to bind to, so the token is not a convenience, it is the mechanism.
+uapi's
 durable sidecar plus <code>X-Confirm-Token</code> is that design, arrived at independently.</p>
 <p>Two things the prior art says uapi's design is still missing:</p>
 <ul>
 <li><strong>Renewal.</strong> In NETCONF, arming again inside a live window is first-class: it
   extends the timer and may carry more changes, while the revert baseline stays
-  the snapshot taken at the <em>first</em> arm. That is exactly the arm-once-keep-writing
-  shape an apply needs, and it means the deadline does not have to be sized for a
+  the snapshot taken at the <em>first</em> arm. That is exactly the
+  arm-once-keep-writing
+  shape an apply needs, and it means the deadline does not have to be sized for
+  a
   worst-case apply up front. A window that must outlive the whole apply forces a
   long deadline, which is also the recovery latency after a lockout. Renewal
   decouples the two. Any renewal path must not re-snapshot, or the net silently
   shrinks to cover only the last write.</li>
 <li><strong>A stated answer for a plain write inside a live window.</strong> RESTCONF's HTTP
   mapping refused to leave this implicit: an unmarked edit either <em>is</em> the
-  confirming commit or is rejected <code>409</code>. uapi's design says nothing, and "neutral
+  confirming commit or is rejected <code>409</code>. uapi's design says nothing, and
+  "neutral
   write" is not one of the options the closest analogue allows.</li>
 </ul>
-<p>Also worth recording: RESTCONF deliberately did not standardise confirmed commit,
-and the IETF still has no interoperable contract for sessionless transports. There
+<p>Also worth recording: RESTCONF deliberately did not standardise confirmed
+commit,
+and the IETF still has no interoperable contract for sessionless transports.
+There
 is no spelling to conform to, which argues for keeping uapi's surface minimal
 rather than chasing a vendor shape.</p>
 <h2 id="operator-wrapper-guidance-for-the-eventual-consumer">Operator wrapper guidance (for the eventual consumer)</h2>
@@ -252,8 +274,8 @@ owned by the provider repo. Two rules it must follow:</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/commit-confirm.md</code> at tag <code>v3.4.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.4.0/docs/commit-confirm.md">repository</a>, never here.
+      Rendered from <code>docs/commit-confirm.md</code> at tag <code>v3.5.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.5.0/docs/commit-confirm.md">repository</a>, never here.
     </p>
   </div>
 </footer>

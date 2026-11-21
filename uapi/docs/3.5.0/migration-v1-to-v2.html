@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Migrating from uapi v1 to v2 - uapi 3.4.0 docs</title>
+<title>Migrating from uapi v1 to v2 - uapi 3.5.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.4.0 / Migrating from uapi v1 to v2</p>
+       <a href="/uapi/docs/">docs</a> / 3.5.0 / Migrating from uapi v1 to v2</p>
   </div>
 </header>
 
@@ -44,7 +44,8 @@ uapi</code> over v1.2.x automatically removes the v1 prefix from uhttpd's
    v2 expectations. Test against a staging router.</li>
 <li><code>apk upgrade uapi</code>. The install hook will <code>uhttpd reload</code> automatically;
    existing tokens in <code>/etc/config/uapi</code> are preserved (the file is a conffile).</li>
-<li>Verify <code>GET /api/v2/healthz</code> returns <code>{"status":"ok", "version":"2.0.0", ...}</code>.
+<li>Verify <code>GET /api/v2/healthz</code> returns <code>{"status":"ok", "version":"2.0.0",
+   ...}</code>.
    The new URL prefix is <code>/api/v2/</code>; the install hook handles the uhttpd
    prefix migration. v1 clients hitting <code>/api/v1/</code> get a 404 from uhttpd
    because the old prefix is no longer registered (this is intentional - the
@@ -426,7 +427,8 @@ immediately - the token store is re-read on every request.</p>
 <h2 id="idempotency-and-conditional-get">Idempotency and conditional GET</h2>
 <p>Two safe additions for Terraform-style and dashboard-style clients:</p>
 <ul>
-<li><strong>POST retries are no longer dangerous.</strong> Send <code>Idempotency-Key: &lt;client-uuid&gt;</code>
+<li><strong>POST retries are no longer dangerous.</strong> Send <code>Idempotency-Key:
+  &lt;client-uuid&gt;</code>
   with each POST; if the network blips and you retry the same payload, you
   get the original response back instead of a duplicate resource. uhttpd's
   CGI env strips the header by default, so pass <code>?idempotency_key=&lt;id&gt;</code> as
@@ -440,13 +442,16 @@ immediately - the token store is re-read on every request.</p>
 GET, so changing a zone invalidated the rule's ETag. That was dropped again
 during the 2.x line, and this section described it as current until 2.5.0.
 the ETag helper in <code>src/lib/handler.uc</code> hashes the response body with
-<code>runtime</code> stripped and nothing else, so an ETag reflects only its own resource. Cross-resource
+<code>runtime</code> stripped and nothing else, so an ETag reflects only its own resource.
+Cross-resource
 consistency is enforced at <code>resource.validate()</code> time on every write instead;
 <code>docs/architecture.md</code> carries the current contract.</p>
 <p>Declared dependencies at v2.0 launch:</p>
 <ul>
-<li><code>firewall.rules</code>, <code>firewall.redirects</code>, <code>firewall.forwardings</code> → <code>firewall:zone</code></li>
-<li><code>sqm.queues</code>, <code>network.routes</code>, <code>dhcp.servers</code>, <code>network.wireguard_peers</code> → <code>network:interface</code></li>
+<li><code>firewall.rules</code>, <code>firewall.redirects</code>, <code>firewall.forwardings</code> →
+  <code>firewall:zone</code></li>
+<li><code>sqm.queues</code>, <code>network.routes</code>, <code>dhcp.servers</code>, <code>network.wireguard_peers</code> →
+  <code>network:interface</code></li>
 <li><code>network.bridge_vlans</code> → <code>network:device</code></li>
 </ul>
 <p>If your client was already correctly handling 412 on If-Match writes, this is
@@ -455,7 +460,8 @@ strictly more accurate - no behavior change required.</p>
 <ul>
 <li>The atomic-transaction recipe (snapshot → validate → commit → reload →
   restore on failure).</li>
-<li>The error envelope shape (<code>code</code>, <code>message</code>, <code>request_id</code>, optional <code>errors[]</code>).</li>
+<li>The error envelope shape (<code>code</code>, <code>message</code>, <code>request_id</code>, optional
+  <code>errors[]</code>).</li>
 <li>The bearer-token + scope-tree authn/authz model (scopes are additive; new
   ones added, no existing ones renamed or removed).</li>
 <li>The fork-per-request CGI execution model.</li>
@@ -467,8 +473,8 @@ strictly more accurate - no behavior change required.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/migration-v1-to-v2.md</code> at tag <code>v3.4.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.4.0/docs/migration-v1-to-v2.md">repository</a>, never here.
+      Rendered from <code>docs/migration-v1-to-v2.md</code> at tag <code>v3.5.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.5.0/docs/migration-v1-to-v2.md">repository</a>, never here.
     </p>
   </div>
 </footer>

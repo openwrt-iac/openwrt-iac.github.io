@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tokens and scopes - uapi 3.4.0 docs</title>
+<title>Tokens and scopes - uapi 3.5.0 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 3.4.0 / Tokens and scopes</p>
+       <a href="/uapi/docs/">docs</a> / 3.5.0 / Tokens and scopes</p>
   </div>
 </header>
 
@@ -29,19 +29,44 @@ authorized against a hierarchical scope tree.</p>
                   [--force]
 </code></pre>
 <ul>
-<li><code>--name</code>: human-readable label. Must be unique: a name that another section of <code>/etc/config/uapi</code> already holds is refused. Must match <code>[A-Za-z0-9_]+</code> (uci section-name charset; use underscores instead of hyphens). Surfaces in the audit log on every authed request. <code>POST /tokens</code> takes at most 63 characters, and the CLI takes any length. A longer name keeps its rate-limit bucket and its last-used marker in a file named by the sha256 of the name, because a file name holds 255 bytes. A name longer than 238 characters gets no series in <code>/metrics</code>, whose files are named by their labels.</li>
-<li><code>--scope</code>: at least one. May repeat. Validated against the known scope tree (see below); <code>--force</code> bypasses.</li>
-<li><code>--expires-in</code>: optional duration. Suffix is one of <code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>. The token returns <code>401 invalid_token</code> with <code>message: "Token expired"</code> after the deadline passes.</li>
-<li><code>--allowed-cidr</code>: optional source-IP allowlist (IPv4 or IPv6 CIDRs; may repeat). When set, the token returns <code>401 invalid_token</code> with <code>message: "Source IP not permitted for this token"</code> from any other source. Bad CIDR shape rejected at mint time.</li>
-<li>Output (stdout): the cleartext bearer string, exactly once. Stderr explains it's the only chance to capture it.</li>
+<li><code>--name</code>: human-readable label. Must be unique: a name that another section of
+  <code>/etc/config/uapi</code> already holds is refused. Must match <code>[A-Za-z0-9_]+</code> (uci
+  section-name charset; use underscores instead of hyphens). Surfaces in the
+  audit log on every authed request. <code>POST /tokens</code> takes at most 63 characters,
+  and the CLI takes any length. A longer name keeps its rate-limit bucket and
+  its last-used marker in a file named by the sha256 of the name, because a file
+  name holds 255 bytes. A name longer than 238 characters gets no series in
+  <code>/metrics</code>, whose files are named by their labels.</li>
+<li><code>--scope</code>: at least one. May repeat. Validated against the known scope tree
+  (see below); <code>--force</code> bypasses.</li>
+<li><code>--expires-in</code>: optional duration. Suffix is one of <code>s</code>/<code>m</code>/<code>h</code>/<code>d</code>. The token
+  returns <code>401 invalid_token</code> with <code>message: "Token expired"</code> after the deadline
+  passes.</li>
+<li><code>--allowed-cidr</code>: optional source-IP allowlist (IPv4 or IPv6 CIDRs; may
+  repeat). When set, the token returns <code>401 invalid_token</code> with <code>message:
+  "Source IP not permitted for this token"</code> from any other source. Bad CIDR
+  shape rejected at mint time.</li>
+<li>Output (stdout): the cleartext bearer string, exactly once. Stderr explains
+  it's the only chance to capture it.</li>
 </ul>
-<p>The router stores only the salt + <code>sha256(salt + ":" + bearer)</code>. The cleartext cannot be recovered.</p>
-<p>The token store is re-read from <code>/etc/config/uapi</code> on every request (uci read is millisecond-scale; the fork-per-request model means no cross-request cache anyway). Newly created tokens take effect immediately; no <code>uhttpd reload</code> is needed.</p>
+<p>The router stores only the salt + <code>sha256(salt + ":" + bearer)</code>. The cleartext
+cannot be recovered.</p>
+<p>The token store is re-read from <code>/etc/config/uapi</code> on every request (uci read is
+millisecond-scale; the fork-per-request model means no cross-request cache
+anyway). Newly created tokens take effect immediately; no <code>uhttpd reload</code> is
+needed.</p>
 <pre><code class="language-sh">uapi-token list             # short summary: name, scopes, expiry (if set), allowed_cidrs (if set)
 uapi-token show &lt;name&gt;      # detailed view (scopes, expiry, cidrs, last_used_at/ip; no secret)
 uapi-token revoke &lt;name&gt;    # delete a token
 </code></pre>
-<p><code>uapi-token create</code> and <code>revoke</code> take the locks that an HTTP write of the token store takes, the global lock shared and the lock of the <code>uapi</code> package exclusive, so that a write of the CLI and one of the HTTP path to <code>/etc/config/uapi</code> cannot lose each other. An HTTP write holds these locks for milliseconds, and the CLI waits up to 10 s for them. A non-uci write, such as an <code>apk</code> run through <code>/packages/installed</code>, can hold the global lock for longer. When a lock is still held after 10 s, the command names it and exits 75 (<code>EX_TEMPFAIL</code>), having written nothing, so a retry is safe.</p>
+<p><code>uapi-token create</code> and <code>revoke</code> take the locks that an HTTP write of the token
+store takes, the global lock shared and the lock of the <code>uapi</code> package
+exclusive, so that a write of the CLI and one of the HTTP path to
+<code>/etc/config/uapi</code> cannot lose each other. An HTTP write holds these locks for
+milliseconds, and the CLI waits up to 10 s for them. A non-uci write, such as an
+<code>apk</code> run through <code>/packages/installed</code>, can hold the global lock for longer.
+When a lock is still held after 10 s, the command names it and exits 75
+(<code>EX_TEMPFAIL</code>), having written nothing, so a retry is safe.</p>
 <h2 id="creating-tokens-http">Creating tokens (HTTP)</h2>
 <p>A token holding <code>uapi:tokens:rw</code> (or <code>*:rw</code>) can mint other tokens over the
 wire:</p>
@@ -55,25 +80,40 @@ wire:</p>
      }'
 # response: { &quot;bearer&quot;: &quot;&lt;cleartext-once&gt;&quot;, &quot;name&quot;: &quot;ci_bot&quot; }
 </code></pre>
-<p><code>allowed_cidrs</code> takes prefixes of either family, and a list may mix them. A caller is matched
-against entries of its own family only, so <code>0.0.0.0/0</code> does not admit an IPv6 caller and <code>::/0</code>
-does not admit an IPv4 one: a dual-stack router that means "any" has to say both. A caller
-arriving as an IPv4-mapped IPv6 address is matched against the IPv4 entries. An IPv6 prefix length
-is 1 to 3 digits: an entry such as <code>fd00::/0x40</code>, which 3.1 read as <code>/0</code>, is refused at mint time,
-and a stored one admits no caller. The validation sweep does not cover tokens, so
+<p><code>allowed_cidrs</code> takes prefixes of either family, and a list may mix them. A
+caller is matched
+against entries of its own family only, so <code>0.0.0.0/0</code> does not admit an IPv6
+caller and <code>::/0</code>
+does not admit an IPv4 one: a dual-stack router that means "any" has to say
+both. A caller
+arriving as an IPv4-mapped IPv6 address is matched against the IPv4 entries. An
+IPv6 prefix length
+is 1 to 3 digits: an entry such as <code>fd00::/0x40</code>, which 3.1 read as <code>/0</code>, is
+refused at mint time,
+and a stored one admits no caller. The validation sweep does not cover tokens,
+so
 <code>uapi-token list</code> is where a stored entry shows.</p>
-<p>The caller's scopes must cover the requested scopes, equal or narrower. Escalation
+<p>The caller's scopes must cover the requested scopes, equal or narrower.
+Escalation
 returns <code>403 scope_escalation_blocked</code>. A name that a token or another
 section of the token store already holds returns <code>409 conflict</code>.</p>
-<p>A mint removes the rate-limit buckets and the last-used markers of the tokens that no longer
-authenticate, and folds their metric series into <code>token_id="-retired"</code>, before it commits the
-new token. A request that uhttpd kills during that cleanup has committed nothing, so it cannot
-lose the bearer of a token that exists. <code>uapi-token create</code> cleans up the same way, then
+<p>A mint removes the rate-limit buckets and the last-used markers of the tokens
+that no longer
+authenticate, and folds their metric series into <code>token_id="-retired"</code>, before
+it commits the
+new token. A request that uhttpd kills during that cleanup has committed
+nothing, so it cannot
+lose the bearer of a token that exists. <code>uapi-token create</code> cleans up the same
+way, then
 commits, then prints the bearer.</p>
-<p>uapi keeps no cleartext bearer, with one exception. A <code>POST /tokens</code> that carries an
-<code>Idempotency-Key</code> is cached with its response, bearer included, for 24 h, in a file of mode 0600
-that only root can read. A retry by the same token with the same key and body gets that
-response back, so for such a client a request killed after the cache write loses no bearer
+<p>uapi keeps no cleartext bearer, with one exception. A <code>POST /tokens</code> that
+carries an
+<code>Idempotency-Key</code> is cached with its response, bearer included, for 24 h, in a
+file of mode 0600
+that only root can read. A retry by the same token with the same key and body
+gets that
+response back, so for such a client a request killed after the cache write loses
+no bearer
 either.</p>
 <pre><code class="language-sh">curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v3/tokens
 curl -H &quot;Authorization: Bearer $ADMIN&quot; https://router/api/v3/tokens/ci_bot
@@ -140,8 +180,10 @@ its own metadata).</p>
 segment for wildcards:</p>
 <ul>
 <li><code>*:rw</code> / <code>*:ro</code> - top-level wildcard, matches everything.</li>
-<li><code>firewall:*:ro</code> - mid-tree wildcard, matches every firewall subresource (rules, zones, redirects, nat, forwardings, defaults) but NOT the bare domain.</li>
-<li><code>*:rules:ro</code> - also valid; matches the <code>rules</code> subresource of every domain that has one.</li>
+<li><code>firewall:*:ro</code> - mid-tree wildcard, matches every firewall subresource
+  (rules, zones, redirects, nat, forwardings, defaults) but NOT the bare domain.</li>
+<li><code>*:rules:ro</code> - also valid; matches the <code>rules</code> subresource of every domain
+  that has one.</li>
 </ul>
 <p>At equal depth, an exact segment beats a wildcard segment
 (<code>firewall:rules:rw</code> wins over <code>firewall:*:ro</code> for <code>/firewall/rules</code>).</p>
@@ -283,7 +325,8 @@ prefix decides. <code>rw</code> and <code>ro</code> at the same depth: <code>rw<
 <p><code>/raw/&lt;package&gt;/&lt;id&gt;</code> requires <strong>both</strong> trees to permit, independently:</p>
 <ol>
 <li>The raw tree: <code>raw</code> / <code>raw:&lt;package&gt;</code> matches.</li>
-<li>The domain tree: evaluated against the section's actual type. <code>firewall.rule</code> -&gt; <code>firewall:rules</code>, <code>network.interface</code> -&gt; <code>network:interfaces</code>, etc.</li>
+<li>The domain tree: evaluated against the section's actual type. <code>firewall.rule</code>
+   -&gt; <code>firewall:rules</code>, <code>network.interface</code> -&gt; <code>network:interfaces</code>, etc.</li>
 </ol>
 <p>A token with <code>raw:rw</code> but only <code>firewall:rules:ro</code> can read firewall rules
 via <code>/raw/firewall/...</code> but cannot write them. The domain-tree override
@@ -292,7 +335,9 @@ backdoor around carefully-crafted curated scopes.</p>
 <p>For packages outside the curated set, the domain check uses
 <code>[&lt;package&gt;]</code>. Granting <code>*:rw</code> or that specific package scope covers it.</p>
 <h2 id="per-token-rate-limit">Per-token rate limit</h2>
-<p>Tokens carry optional <code>rate</code> (requests/second) and <code>burst</code> (token-bucket capacity) overrides that beat the global rate-limit default (100 req/s, burst 200). Absent options inherit the global.</p>
+<p>Tokens carry optional <code>rate</code> (requests/second) and <code>burst</code> (token-bucket
+capacity) overrides that beat the global rate-limit default (100 req/s, burst
+200). Absent options inherit the global.</p>
 <p>Set at mint time via CLI:</p>
 <pre><code class="language-sh">uapi-token create --name ci_bot --scope '*:rw' --rate 10 --burst 20
 </code></pre>
@@ -306,7 +351,10 @@ backdoor around carefully-crafted curated scopes.</p>
        &quot;burst&quot;: 20
      }'
 </code></pre>
-<p>Both values must be positive integers; non-positive or non-integer values return <code>422 validation_failed</code>. The uci options on the token's section are <code>option rate '&lt;N&gt;'</code> and <code>option burst '&lt;N&gt;'</code>; setting them directly via <code>uci set</code> is also supported and takes effect on the next request.</p>
+<p>Both values must be positive integers; non-positive or non-integer values return
+<code>422 validation_failed</code>. The uci options on the token's section are <code>option rate
+'&lt;N&gt;'</code> and <code>option burst '&lt;N&gt;'</code>; setting them directly via <code>uci set</code> is also
+supported and takes effect on the next request.</p>
 <h2 id="recommended-token-shapes">Recommended token shapes</h2>
 <table>
 <thead>
@@ -360,8 +408,8 @@ backdoor around carefully-crafted curated scopes.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/tokens.md</code> at tag <code>v3.4.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v3.4.0/docs/tokens.md">repository</a>, never here.
+      Rendered from <code>docs/tokens.md</code> at tag <code>v3.5.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v3.5.0/docs/tokens.md">repository</a>, never here.
     </p>
   </div>
 </footer>
