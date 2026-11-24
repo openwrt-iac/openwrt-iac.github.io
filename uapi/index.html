@@ -26,7 +26,7 @@
       <a class="btn" href="https://github.com/openwrt-iac/uapi">View on GitHub</a>
     </div>
     <p class="micro">
-      v3.5.0 - signed APK feed - MIT licensed - OpenWrt 25.12 +
+      v4.0.0 - signed APK feed - MIT licensed - OpenWrt 25.12 +
     </p>
   </div>
 </header>
@@ -97,7 +97,7 @@
 }
 
 provider "uapi" {
-  endpoint = "https://router.example.com/api/v3"
+  endpoint = "https://router.example.com/api/v4"
   token    = var.uapi_token       # mint with `uapi-token create`
 }
 
@@ -132,11 +132,11 @@ resource "uapi_firewall_rule" "ssh_mgmt" {
       <li>
         <strong>Use it</strong> from anywhere with HTTPS:
 <pre><code>curl -H "Authorization: Bearer $TOKEN" \
-  https://router/api/v3/firewall/rules
+  https://router/api/v4/firewall/rules
 
 curl -H "Authorization: Bearer $TOKEN" \
      -H 'Content-Type: application/json' \
-     -X POST https://router/api/v3/firewall/rules \
+     -X POST https://router/api/v4/firewall/rules \
      -d '{"name":"allow-mgmt","target":"ACCEPT",
           "match":{"src_zone":"lan","dest_port":[22]}}'</code></pre>
       </li>
@@ -146,11 +146,11 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 <section class="surface">
   <div class="container">
-    <h2>What ships in 3.5.0</h2>
+    <h2>What ships in 4.0.0</h2>
     <div class="surface-grid">
 
       <div>
-        <h3>50 curated resources</h3>
+        <h3>53 curated resources</h3>
         <ul>
           <li><code>network/</code> interfaces, devices, routes, rules, bridge-vlans, wireguard-peers</li>
           <li><code>firewall/</code> zones, rules, redirects, forwardings, defaults</li>
@@ -166,7 +166,7 @@ curl -H "Authorization: Bearer $TOKEN" \
         <h3>Generic raw passthrough</h3>
         <p>
           The long tail of OpenWrt config under
-          <code>/api/v3/raw/&lt;package&gt;/&lt;section&gt;</code>.
+          <code>/api/v4/raw/&lt;package&gt;/&lt;section&gt;</code>.
           Same atomic-transaction recipe, same auth + scope model,
           payloads pass through uci field names directly.
         </p>
@@ -196,11 +196,11 @@ curl -H "Authorization: Bearer $TOKEN" \
       <a href="/uapi/docs/">docs by release</a>.
     </p>
     <ul class="docs-list">
-      <li><a href="/uapi/docs/3.5.0/architecture.html">architecture</a> - fork model, lock layout, transaction recipe, ETag derivation, where state lives</li>
-      <li><a href="/uapi/docs/3.5.0/security.html">security</a> - threat model, scope tree, TLS posture, audit shape</li>
-      <li><a href="/uapi/docs/3.5.0/migration-v2-to-v3.html">migration v2 to v3</a> - the prefix move, removed fields, request and response schemas</li>
-      <li><a href="/uapi/docs/3.5.0/tokens.html">tokens</a> - minting, scopes, source-IP pinning, rate-limit overrides</li>
-      <li><a href="/uapi/docs/3.5.0/roadmap.html">roadmap</a> - what's shipped, what's next, what's intentionally out of scope</li>
+      <li><a href="/uapi/docs/4.0.0/architecture.html">architecture</a> - fork model, lock layout, transaction recipe, ETag derivation, where state lives</li>
+      <li><a href="/uapi/docs/4.0.0/security.html">security</a> - threat model, scope tree, TLS posture, audit shape</li>
+      <li><a href="/uapi/docs/4.0.0/migration-v2-to-v3.html">migration v2 to v3</a> - the prefix move, removed fields, request and response schemas</li>
+      <li><a href="/uapi/docs/4.0.0/tokens.html">tokens</a> - minting, scopes, source-IP pinning, rate-limit overrides</li>
+      <li><a href="/uapi/docs/4.0.0/roadmap.html">roadmap</a> - what's shipped, what's next, what's intentionally out of scope</li>
       <li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md">CHANGELOG.md</a> - per-release notes</li>
     </ul>
   </div>

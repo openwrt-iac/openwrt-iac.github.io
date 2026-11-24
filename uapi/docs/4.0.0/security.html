@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uapi security model - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / uapi security model</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="uapi-security-model">uapi security model</h1>
+<p>What uapi defends against, what it doesn't, and what the operator should do.</p>
+<h2 id="threat-model">Threat model</h2>
+<h3 id="in-scope-defended">In scope (defended)</h3>
+<ol>
+<li><strong>Anonymous remote access.</strong> Every endpoint except <code>/healthz</code>,
+   <code>/openapi.json</code>, and <code>/schema*</code> requires a bearer token. There is no
+   anonymous read path on user resources.</li>
+<li><strong>Plain-HTTP credential leak.</strong> TLS is mandatory for every non-localhost
+   request. A non-TLS request from a non-loopback source returns
+   <code>403 tls_required</code> before auth runs.</li>
+<li><strong>Token guessing.</strong> Tokens are 128 random bits (32 hex chars). Server
+   stores <code>sha256(salt || ":" || token)</code>; the cleartext is shown to the
+   operator exactly once at creation. A linear scan through the token store
+   on each request is acceptable: tokens are few, hashes are fast, and
+   compromising the server's <code>/etc/config/uapi</code> exposes only hashes.</li>
+<li><strong>Privilege escalation via HTTP token-mint.</strong> <code>POST /uapi/tokens</code> is gated
+   by <code>uapi:tokens:rw</code>, AND the requested scopes must be covered by the caller's
+   own, equal or narrower - escalation returns <code>403 scope_escalation_blocked</code>. A
+   compromised low-privilege token cannot mint an admin token over the API.</li>
+<li><strong>Stolen-token reuse from elsewhere.</strong> Optional <code>allowed_cidrs</code> on a
+   token pins it to a source CIDR list; requests from outside return
+   <code>401 invalid_token</code>. Optional <code>expires_at</code> makes leaked tokens
+   automatically expire.</li>
+<li><strong>Audit log tampering during compromise.</strong> Each write emits a syslog
+   NOTICE line carrying request_id + token name + path. Forwarding syslog
+   to a remote collector (<code>log_ip</code> in <code>/etc/config/system</code>) is the
+   recommended production setup; a local-only log is destroyable by anyone
+   who roots the box.</li>
+<li><strong>Bypassing scope checks via <code>/raw/</code>.</strong> <code>/raw/&lt;package&gt;/&lt;id&gt;</code> requires
+   BOTH a <code>raw:*:rw|ro</code> scope and the matching domain scope independently.
+   A token with <code>raw:rw</code> but only <code>firewall:ro</code> cannot use <code>/raw/firewall/...</code>
+   to mutate firewall sections.</li>
+<li><strong>Shell metacharacter injection.</strong> Every shell-invoked path (apk install,
+   init-script reload) validates names against
+   <code>^[A-Za-z0-9_-]+$</code> (or <code>^[A-Za-z0-9_+][A-Za-z0-9_+.-]*$</code> for packages)
+   before interpolating, and uses <code>--</code> to separate flags from positional
+   arguments. Service names from ucitrack are validated before
+   interpolating into <code>/etc/init.d/&lt;svc&gt;</code>. The WireGuard apply path in
+   <code>src/lib/wg.uc</code> builds each <code>wg</code> and <code>ip</code> command as an argument list,
+   and one function quotes every argument with <code>shellquote</code>, because the
+   restore after a failed write reads peers straight from uci, where a
+   value never passed <code>validate()</code>. wg.uc also checks the values before it
+   runs a command. A value that uapi stores for a daemon is a separate
+   path, because the daemon or its scripts read it later. See
+   <a href="#values-that-a-daemon-reads-later">Values that a daemon reads later</a>.</li>
+<li><strong>Replay attacks on POST under network flakiness.</strong> <code>Idempotency-Key</code>
+   caches the response for 24 h; a network-blipped retry returns the cached
+   response, not a duplicate side effect. Same key with a different body
+   returns <code>409 idempotency_key_conflict</code> - a request was reused for an
+   unrelated payload.</li>
+<li><strong>Resource exhaustion via flood.</strong> Per-token rate limit returns
+    <code>429 too_many_requests</code> with <code>Retry-After</code>. Default is 100/s burst 200
+    per token; tunable via <code>/etc/config/uapi</code>.</li>
+<li><strong>uhttpd self-lockout.</strong> <code>uhttpd/instances</code> refuses a PATCH or a PUT on
+    the <code>main</code> instance that would strip uapi's own <code>ucode_prefix</code> entry, and a
+    DELETE of <code>main</code> while it holds that entry, with <code>422 conflict</code>, instead of
+    leaving uapi unreachable. A <code>/raw/uhttpd</code> write runs no such check
+    (<a href="https://github.com/openwrt-iac/uapi/issues/441">#441</a>). A raw write that
+    removes the section or the entry still removes the mount, and the next
+    request then gets a 404 from uhttpd. <code>docs/raw.md</code> says why.</li>
+<li><strong>Network self-lockout.</strong> Advisory rather than a refusal, because unlike
+    item 11 there is a legitimate version of the write: renumbering the
+    management VLAN or moving to an out-of-band path. A <code>network/interfaces</code>
+    write that moves the inbound interface's <code>disabled</code>, <code>proto</code>, <code>ipaddrs</code> or
+    <code>netmask</code> returns <code>X-Mgmt-Path-Warning</code>, and so does a <code>network/devices</code> or
+    <code>network/bridge_vlans</code> write naming the caller's device or the bridge it is
+    a port of. <code>GET /uapi/diagnostics</code> reports <code>management_path</code> so a caller can
+    check before writing. Firewall lockout is deliberately not covered: it would
+    need fw4 ordering modelled, and the requesting connection survives the
+    reload by design, so uapi cannot detect it by observation either. See
+    <code>docs/operations.md</code>. A wrong bridge VLAN on the management bridge, such as
+    <code>br-lan</code>, can cut every path to the router. Test <code>network/bridge_vlans</code>
+    writes on a bridge that does not carry the management path.</li>
+</ol>
+<h3 id="out-of-scope-not-defended">Out of scope (not defended)</h3>
+<ol>
+<li><strong>Local root compromise.</strong> uapi runs inside uhttpd, which runs as root.
+   An attacker with root on the box already has uci access; the API is a
+   wrapper. We do not defend against in-process attacks once the workload
+   ID is admin.</li>
+<li><strong>Fine-grained side channels.</strong> The hash compare in auth is
+   constant-time (byte-XOR-accumulate via <code>values.constant_time_equals</code>)
+   and the authorize loop iterates every token regardless of where the
+   match occurs, so the dominant timing channel is closed. Pre-match work
+   (the <code>t.salt == null || t.hash == null</code> skip, hash-function runtime itself)
+   and
+   downstream paths (expiry check, CIDR match, scope lookup) are not
+   constant-time. A determined attacker with low-latency local access
+   could in principle still extract bits, but tokens are 128 random bits
+   and the rate limit + audit log make recovery infeasible in practice.</li>
+<li><strong>DoS by sustained legitimate traffic.</strong> The rate limit guards per
+   token; the request budget is per uhttpd worker / kernel limits. A
+   determined operator who hands out 10,000 tokens at 100/s each can
+   saturate the box. Don't.</li>
+<li><strong>Compromise of the OpenWrt host network.</strong> If the router's management
+   interface is on a hostile network, no application-layer auth helps. Use
+   uhttpd's TLS + <code>allowed_cidrs</code> + firewall rules to restrict the listen
+   surface.</li>
+</ol>
+<h2 id="scope-model">Scope model</h2>
+<p><code>docs/tokens.md</code> has the scope syntax, the scope tree and the rules that decide
+a match. In short: the deepest matching scope decides, <code>rw</code> implies <code>ro</code>, and
+no match denies. A <code>/raw/</code> request needs both the raw scope and the domain scope
+of the section, so a grant of <code>raw:rw</code> does not bypass a narrow domain scope.</p>
+<h3 id="scopes-that-grant-root">Scopes that grant root</h3>
+<p>Some write scopes let the holder run code as root directly, or choose a file
+that a root daemon
+writes. Grant each one as if it were <code>*:rw</code>:</p>
+<ul>
+<li><code>system:cron_jobs:rw</code> adds a crontab line, and crond runs its command as root.</li>
+<li><code>system:authorized_keys:rw</code> adds an SSH key that logs in as root.</li>
+<li><code>system:password:rw</code> sets the root password.</li>
+<li><code>packages:installed:rw</code> installs a package, and its install script runs as
+  root.</li>
+<li><code>uhttpd:instances:rw</code> sets the document root and the CGI, Lua and ucode
+  prefixes of an
+  instance, so it chooses which programs uhttpd runs as root and which files it
+  serves.</li>
+<li><code>dhcp:odhcpd:rw</code> sets <code>leasetrigger</code>, a program that odhcpd runs as root on
+  each lease change.</li>
+<li><code>dhcp:dnsmasq:rw</code> sets <code>leasefile</code>, a file that dnsmasq opens as root and
+  rewrites with its
+  leases.</li>
+</ul>
+<p>The list is not complete: several uci options name a script that a daemon runs
+as root.
+A parent scope includes them, so <code>system:rw</code> grants the first three. Deepest
+match wins,
+so <code>system:rw</code> with <code>system:cron_jobs:ro</code> keeps the system writes and denies
+cron writes.</p>
+<p>One read scope deserves the same care. <code>system:cron_jobs:ro</code>, and every scope
+above it up
+to <code>*:ro</code>, returns each root crontab command in full, and a command can carry a
+credential.
+Keep secrets in a 0600 file that the command reads, rather than on the crontab
+line.</p>
+<h3 id="values-that-a-daemon-reads-later">Values that a daemon reads later</h3>
+<p>An init script copies some stored values into a daemon's config file or into a
+shell command
+without quoting, and root reads the result. In the curated values that an audit
+for 3.2.0 found,
+uapi refuses the characters that end the line or the argument, so that a value
+cannot add a
+directive, a command or a command argument. The check runs when a write goes
+through uapi, so a
+value that LuCI, <code>uci</code> or another writer stored stays until a write replaces it.</p>
+<p><code>/raw/</code> checks a value only for what uci can store, never for what a daemon
+reads.
+<code>raw:&lt;package&gt;:rw</code> with a domain scope of that package counts as a root scope
+for each package
+that a root daemon or script reads.</p>
+<p>uapi checks the dnsmasq config after a reload with <code>dnsmasq --test</code>, as root and
+outside the jail
+that procd gives dnsmasq, so a <code>conf-script</code> in that config runs there too. Only
+<code>raw:dhcp:rw</code> with
+a domain scope of <code>dhcp</code>, a root scope already, can write such a line.</p>
+<h3 id="audit-consequence">Audit consequence</h3>
+<p>The token <em>name</em> is logged on every audit line. Tokens should be named for
+their owner (<code>ci_bot</code>, <code>terraform_prod</code>, <code>alice_laptop</code>) so the audit log
+identifies the responsible party, not a hash.</p>
+<h2 id="authentication-design-exclusions">Authentication-design exclusions</h2>
+<p>uapi defends the surface above with bearer tokens deliberately, not by accident.
+Two design candidates that would seem natural but are explicitly rejected:</p>
+<ul>
+<li><strong>No rpcd sessions.</strong> The OpenWrt rpcd session model (login endpoint returning
+  a session id, session expiry, ubus <code>session.*</code> namespace) is well-trodden by
+  LuCI but adds a runtime store, session-eviction machinery, and a separate
+  failure mode for "session expired vs token revoked." uapi's bearer-token model
+  is simpler at the cost of forcing the operator to mint tokens out of band.</li>
+<li><strong>No HTTP login endpoint.</strong> Tokens are minted via the <code>uapi-token</code> CLI on the
+  router or via <code>POST /uapi/tokens</code> (which itself requires a token with
+  <code>uapi:tokens:rw</code>). There is no bootstrap "POST /login with username+password
+  to get a token" path. The first token is always minted locally; everything
+  after composes from that.</li>
+</ul>
+<p>Both could be added without breaking the wire surface (new endpoints are
+non-breaking). The deliberate exclusion is to keep the security model auditable
+as "the set of tokens in <code>/etc/config/uapi</code>" with no second authentication path
+to reason about.</p>
+<h2 id="public-endpoints">Public endpoints</h2>
+<p>Three endpoints skip the bearer-token requirement:</p>
+<ul>
+<li><code>GET /healthz</code>: liveness probe; minimal info.</li>
+<li><code>GET /openapi.json</code>: spec discovery.</li>
+<li><code>GET /schema/*</code>: per-resource JSON Schema (codegen input).</li>
+</ul>
+<p>All three still pass the TLS check; only the bearer requirement is waived. Plain
+HTTP from a non-loopback source still returns <code>403 tls_required</code> before the
+public-endpoint short-circuit runs.</p>
+<p>uapi reads and parses the body of a POST, PUT or PATCH before the bearer check,
+on every path. <code>json()</code> takes about 1.6 KB for each object or array, so 1 MiB of
+<code>[{},{},...]</code> took 560 MB. A body over 256 KiB, sent with a <code>Content-Length</code> or
+chunked, or a body with more than 2000 <code>{</code> and <code>[</code> characters, answers <code>413
+payload_too_large</code> before the parse, which keeps the parse of a body without a
+token under about 13 MB (measured with ucode 2026.01.16 on x86_64). A
+<code>Content-Length</code> that uapi does not read as a whole number from 0 to 262144
+answers 413 too, because uhttpd reads such a value in another way: on a 64-bit
+router it wraps a value of 2^32 or more. uhttpd hands a chunked body over
+de-chunked and with no <code>Content-Length</code>, and uapi reads it until uhttpd closes
+the pipe after the last chunk. uapi joins the parts of a body as it reads them,
+so a body that arrives a byte at a time takes about as much memory as one that
+arrives whole.</p>
+<p>uhttpd parses what the request process leaves unread as the next request on the
+connection. So before it answers, on every path and the public endpoints
+included, uapi reads and drops what is left of every body that uhttpd hands
+over. uhttpd does not hand over some bodies whole, and uapi cannot drop what
+follows them: uhttpd ends a chunked body at a chunk extension, parses a trailer
+after the last chunk as a new request, and reads a <code>Transfer-Encoding</code> value
+other than <code>chunked</code> in lower case, such as <code>Chunked</code>, as no body.</p>
+<p>A body has to arrive in full within 10 s of the start of the request process.
+uhttpd hands it over a blocking pipe, where a process that waits for a body that
+does not come holds one of the <code>max_requests</code> of uhttpd, 3 by default and shared
+with LuCI, until the script timeout of uhttpd, 60 s by default. uapi makes the
+pipe non-blocking with <code>ucode-mod-io</code>. So a POST, PUT or PATCH whose client
+declares a body and sends less, sends it too slowly, or does not send the last
+chunk of a chunked body, gets <code>400 bad_request</code> after about 10 s, before the
+bearer check, and syslog gets a <code>uapi-body-deadline</code> line
+(<code>docs/operations.md</code>). The drop of what is left of a body stops at the same
+deadline. So a request that answers without reading its body gets its normal
+answer 10 s after it started when that body does not arrive, and logs the same
+line: a 413, a POST to <code>/healthz</code>, or a GET or DELETE with a declared body. A
+DELETE has then already been applied. uapi checks the deadline when it finds the
+pipe empty, so that a drop after a write that took longer still reads a body
+that has arrived. A body that keeps arriving faster than uapi drops it is
+therefore bounded by its <code>Content-Length</code> or its last chunk and by the script
+timeout, not by the deadline. The deadline bounds each request, not how many a
+client opens one after another. Without <code>ucode-mod-io</code>, uapi reads a body from
+the blocking pipe with no deadline, and logs that once when uhttpd starts.</p>
+<p>uhttpd keeps the connection open after every answer of the handler, and nothing
+that uapi sends makes it close the connection. After a body that missed the
+deadline, uhttpd parses what the client sends next on the connection, the rest
+of that body included, as a new request, and answers it. For a client on its own
+connection this changes nothing that it could not do with a request of its own.
+It matters behind a reverse proxy that streams request bodies to uhttpd and
+reuses its connections to uhttpd for other clients: the rest of a late body
+would reach uhttpd as a request, and its answer would go to the request that the
+proxy sends next on that connection. Such a proxy should buffer each request
+body before it forwards it, as nginx does by default, or close a connection to
+uhttpd on which it did not finish sending a request.</p>
+<h2 id="tls-posture">TLS posture</h2>
+<ul>
+<li><code>uhttpd</code> serves both HTTP and HTTPS. <code>tls_check()</code> permits HTTP only
+  when the request is loopback (<code>127.0.0.1</code> / <code>::1</code> / <code>::ffff:127.0.0.1</code>)
+  OR the marker file <code>/etc/uapi.insecure</code> exists.</li>
+<li>The default uhttpd self-signed cert is NOT adequate for production.
+  Operators should provision a real cert via <code>acme.sh</code> /
+  <code>luci-app-acme</code> (<code>docs/installation.md</code> covers this).</li>
+<li>mutual TLS (mTLS) via <code>tls_client_cert_file</code> /
+  <code>tls_require_client_cert</code> is supported as a defense-in-depth layer on
+  top of bearer auth - see <code>docs/installation.md</code>.</li>
+<li>The <code>/etc/uapi.insecure</code> marker is for closed-network testing only.
+  Every request that bypasses TLS via the marker emits a NOTICE-level
+  <code>uapi-insecure-bypass &lt;request_id&gt; &lt;method&gt; &lt;path&gt; status=&lt;n&gt; remote=&lt;addr&gt;</code>
+  syslog line. Monitor for this in production to detect drift.</li>
+</ul>
+<h2 id="token-storage">Token storage</h2>
+<p><code>/etc/config/uapi</code> token sections:</p>
+<pre><code>config token 'ci_bot'
+    option salt 'a1b2c3d4...'
+    option hash 'e5f6...sha256-of-salt-colon-token'
+    list scopes '*:rw'
+    option expires_at '1733000000'             # optional
+    list allowed_cidrs '10.0.0.0/8'             # optional
+    option last_used_at '1732999900'            # tracked
+    option last_used_ip '10.0.0.42'             # tracked
+</code></pre>
+<ul>
+<li>Cleartext token is shown exactly once at creation (<code>uapi-token create</code>
+  CLI or <code>POST /uapi/tokens</code> HTTP). Never logged. A <code>POST /uapi/tokens</code> that
+  carries an <code>Idempotency-Key</code> returns it again to a retry with the same key and
+  body, see <code>docs/tokens.md</code>.</li>
+<li>Salt is 64 random bits (16 hex chars); hash is <code>sha256(salt || ":" || token)</code>.</li>
+<li><code>/etc/config/uapi</code> has mode 0600, which the install hook sets, and is no
+  file of the package, so apk keeps it across upgrades and removal.
+  sysupgrade keeps it because base-files lists all of <code>/etc/config/</code> in its
+  keep.d, and <code>/lib/upgrade/keep.d/uapi</code> names it
+  while the package is installed.</li>
+<li>last-used tracking is throttled to ~1 write/minute per token via a tmpfs
+  sentinel (<code>/var/run/uapi-token-update/&lt;token-id&gt;</code>, or the sha256 of a
+  name longer than 63 characters); the wire response
+  never depends on the audit write.</li>
+</ul>
+<p>The <code>salt</code>+<code>hash</code> design defends against an offline attacker who reads the
+token store. The hash + 16-char salt makes any pre-computed rainbow attack
+useless and forces a per-token bruteforce; the token's own 128 bits make
+that intractable.</p>
+<h2 id="rate-limit-guarantees-and-non-guarantees">Rate limit guarantees (and non-guarantees)</h2>
+<ul>
+<li>The token bucket is per-token, file-backed at <code>/var/run/uapi-ratelimit/</code>.</li>
+<li>Under heavy concurrent load against the same token, two forks may race
+  the read-modify-write and one increment may be lost. The worst case is
+  one request's worth of bucket drift, bounded by the burst size.</li>
+<li>The rate limit is <strong>not a security control on its own</strong> - it's an
+  abuse-mitigation guardrail. A patient attacker can stay under the
+  threshold and grind through the API at the steady-state rate. Use
+  <code>allowed_cidrs</code> (deny by IP, either address family) for actual access control.</li>
+</ul>
+<h2 id="audit-shape">Audit shape</h2>
+<p>Each successful write, each 401 and 403, and each 5xx logs one syslog line with
+the request id and the token name, never the token value. A request through the
+insecure-test marker logs one more line. <code>docs/operations.md</code> § Log line format
+has the format.</p>
+<h3 id="recommendations-for-hardened-deployments">Recommendations for hardened deployments</h3>
+<ol>
+<li><strong>Configure persistent syslog</strong> (<code>log_file</code> in <code>/etc/config/system</code>).
+   The default ringbuffer is volatile.</li>
+<li><strong>Forward syslog to a remote collector</strong> (<code>log_ip</code>). A locally-only
+   audit log is destroyable by anyone who roots the box.</li>
+<li><strong>Use NTP.</strong> Audit timestamps are useless if the clock is wrong.
+   <code>/healthz</code> reports <code>time_sync: ok</code> when uptime &gt; 60s AND current epoch &gt;
+   1700000000 (a sanity floor), <code>unknown</code> for the first 60 seconds after
+   boot, and <code>degraded</code> once past that with the epoch still below the floor.</li>
+<li><strong>Pin tokens to source CIDRs.</strong> <code>allowed_cidrs</code> defends against token
+   theft from outside the management network. Prefixes of either family are
+   accepted and a list may mix them. A caller is matched only against entries of
+   its own family, so on a dual-stack router <code>0.0.0.0/0</code> alone still denies
+   every
+   IPv6 caller; "any address" means listing both <code>0.0.0.0/0</code> and <code>::/0</code>. That
+   asymmetry is deliberate: an allowlist that silently widened to a second
+   address
+   family would be a worse failure than one that denies.</li>
+<li><strong>Set token expiry.</strong> <code>--expires-in 90d</code> on every minted token forces
+   rotation. The HTTP rotation endpoint (<code>POST /uapi/tokens</code>, which takes
+   <code>expires_in_seconds</code>) makes this ergonomic from automation.</li>
+<li><strong>Use mutual TLS</strong> for service-account workloads (CI, Terraform). It's
+   an independent factor on top of bearer auth and prevents a stolen
+   bearer from being replayed without the cert.</li>
+</ol>
+<h2 id="what-lands-in-syslog">What lands in syslog</h2>
+<p>The audit lines above. The standard error envelope's <code>message</code> field is
+human-readable English and may name specific failing fields (<code>"src_zone is
+required"</code>) - never sensitive values.</p>
+<p>Specifically NOT logged:
+- Cleartext token values.
+- Cleartext passwords (the <code>system/password</code> endpoint audit-logs the user
+  name and request id, never the password).
+- TLS certificate or key material.</p>
+<h2 id="reporting-issues">Reporting issues</h2>
+<p>Do not file a security issue as a public GitHub issue. Use GitHub's private
+vulnerability
+reporting, linked from <a href="../SECURITY.md"><code>SECURITY.md</code></a>, which also sets out what
+counts as a
+vulnerability in a daemon that is root-privileged by design, and which of the
+decisions above
+are recorded choices rather than defects.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/security.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/security.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

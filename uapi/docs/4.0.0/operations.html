@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operations - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / Operations</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="operations">Operations</h1>
+<h2 id="success-means-exit-0-not-runtime-convergence">"Success" means exit 0, not runtime convergence</h2>
+<p>A 2xx response to a write means: validate OK, and, when the write changed
+uci, uci commit OK and the init script's reload action exited 0. A write
+that changed nothing commits and reloads nothing, and says so with
+<code>X-Reload-Status: no_reload</code>. It does NOT mean the daemon has finished
+re-converging.</p>
+<p>The most dangerous case is <code>network/interfaces</code>: a write that produces a
+config netifd later rejects (bad proto, missing dep, conflicting
+addresses) can drop the management connection. uapi only sees the init
+script's exit code; netifd's runtime convergence happens after, in the
+background.</p>
+<p>Two signals worth wiring into your automation:</p>
+<ul>
+<li><strong><code>X-Reload-Status</code></strong> on curated-resource writes. <code>ok</code> means that each init
+  script ran and exited 0. It does not promise that the daemon converged.
+  <code>no_reload</code> means that no init script ran: the write changed nothing in uci,
+  or, on a <code>dhcp</code> write, procd runs none of dnsmasq, odhcpd and unbound.
+  <code>unverified</code> means that the write kept its commit, and that uapi does not know
+  whether its daemons took the new config. <code>stopped</code> means that the write kept
+  its commit, and that a daemon that it reloaded is down and procd will not
+  start it again: <code>X-Reload-Stopped</code> names it, and <code>POST
+  /uapi/services/{name}/recover</code> starts it again. See below.</li>
+<li><strong><code>X-Reload-Services</code></strong>: the init scripts that ran, in order. Useful for
+  audit and log correlation.</li>
+</ul>
+<p><code>docs/errors.md</code> § Response headers lists every value of both headers.
+<code>docs/architecture.md</code> § Transaction recipe, steps 0 and 6, has the rules that
+decide which daemons a write reloads and how uapi checks them. What they mean
+for an operator:</p>
+<ul>
+<li><strong>dnsmasq, odhcpd and unbound reload only while procd runs them</strong>, as for a
+  LuCI save. A write does not start a daemon that the operator stopped, but it
+  does start again one that crashed too often. At boot, unbound starts 3 s
+  after the last interface event, and a write before that leaves it alone.</li>
+<li><strong>unbound is watched for 2 s.</strong> When unbound runs, a write that reloads it
+  answers <code>500 reload_failed_restored</code> when an instance stops in the 2 s after
+  the reload. Its <code>reload_error</code> reads, for example, <code>unbound stopped after the
+  reload, with exit code 1</code>. A daemon that stops later still answers 2xx. While
+  <code>/etc/init.d/unbound</code> exists, a <code>dhcp</code> or <code>system</code> write takes the lock of
+  <code>unbound</code>. So such a write answers <code>423 locked</code> while a write to unbound, or
+  another of these writes, runs.</li>
+<li><strong>dnsmasq is checked by its config.</strong> A write that commits <code>dhcp</code> runs
+  <code>dnsmasq --test</code> for each instance after the reload. When dnsmasq refuses the
+  config, the write answers <code>500 reload_failed_restored</code>, and its
+  <code>reload_error</code> reads, for example, <code>dnsmasq refuses its config cfg01411c: bad
+  IP address at line 33 of /var/etc/dnsmasq.conf.cfg01411c</code>. On a router whose
+  dnsmasq config was refused before the write, a write that does not fix it
+  answers <code>500 reload_failed_unrecovered</code>. A config that dnsmasq parses but
+  cannot start with, such as a port that another daemon holds, still answers
+  2xx. <code>--test</code> does not read the files of <code>addn-hosts</code> and <code>servers-file</code>. A
+  <code>system</code> write reloads dnsmasq too, and runs no <code>--test</code>.</li>
+<li><strong>A slow check or reload answers <code>unverified</code>.</strong> uapi kills a <code>--test</code> after
+  10 s, and waits 20 s in all for the reloads of a request. Past either bound,
+  the write keeps its commit and answers 2xx with <code>X-Reload-Status:
+  unverified</code>, and a raw write a <code>reload_note</code>. A <code>system/cron_jobs</code> write
+  answers the header too, and logs the note to syslog as
+  <code>uapi-cron-reload-unverified</code>. Then check the daemon. A router that takes more
+  than 10 s to parse its dnsmasq config, such as a slow MIPS router with large
+  adblock lists, answers <code>unverified</code> on every dhcp write. When the writes to
+  one service answer <code>unverified</code> again and again, a reload of that service
+  does not end: look for its blocked init script with <code>ps</code>.</li>
+<li><strong>A reload that fails late is not seen.</strong> A reload that exits non-zero within
+  the 20 s fails the write and restores. One that fails later answers 2xx
+  <code>unverified</code>, and the failure shows only in the daemon. The restore gets what
+  is left of the 20 s, so a reload that fails after about 10 s can leave too
+  little time for the restore, and the write answers <code>500
+  reload_failed_unrecovered</code>.</li>
+<li><strong>OpenWrt's reload of dnsmasq can restart it</strong>, which on a slow machine can
+  leave it stopped for 5 s. uapi does not report that stop. procd counts each
+  stop that comes less than an hour after a start, and a reload does not reset
+  the count. At the sixth in a row, procd gives up on the instance until the
+  next reload, which can stop it again in the same way. A write that reloads
+  dnsmasq, a <code>system</code> write included, waits 1 s after the reload and then reads
+  the instances from procd. When procd has given up on one, uapi runs
+  <code>/etc/init.d/dnsmasq stop</code>, waits until procd lists no dnsmasq instance, and
+  runs <code>/etc/init.d/dnsmasq start</code>. A start sends no SIGHUP, and the new
+  instance counts from zero. uapi does this once per request, and logs it to
+  syslog as <code>uapi-dnsmasq-recovery</code> with the request id and the outcome. The
+  write keeps its commit. When dnsmasq runs again, it answers as usual. When
+  dnsmasq stays down, it answers <code>X-Reload-Status: stopped</code>, and
+  <code>X-Reload-Stopped</code> names each instance as <code>dnsmasq/&lt;instance&gt;</code>. Send <code>POST
+  /uapi/services/dnsmasq/recover</code> to start it, see <a href="#starting-again-a-service-that-procd-gave-up-on">Starting again a service
+  that procd gave up on</a>.
+  <code>service dnsmasq restart</code> on the router, or a write that changes the dhcp
+  config, starts it too. The stop and the start take their time from what is
+  left of <code>reload_budget_s</code>: up to 3 s for the stop, 2 s for the wait and 5 s
+  for the start. With less than 10 s left, uapi skips them and answers
+  <code>stopped</code>, so a <code>reload_budget_s</code> below 10 turns them off. A stop still
+  running after 3 s gets no start, because a start before the end of the stop
+  can leave dnsmasq out of procd. A start still running after 5 s answers
+  <code>unverified</code>, with <code>X-Reload-Stopped</code> beside it: <code>unverified</code> wins over
+  <code>stopped</code> in <code>X-Reload-Status</code>, also when another check did not finish. On a
+  restore, a dnsmasq that stays down answers <code>500 reload_failed_unrecovered</code>.</li>
+</ul>
+<p>A write to one package that fails and restores takes at most 20 s of reloads,
+2 s of the unbound watch, 10 s of <code>dnsmasq --test</code> per dnsmasq instance and the
+1 s of the dnsmasq respawn check after the reloads of the write and again after
+those of the restore, and up to 5 s of the restore waiting for libuci's flock:
+51 s with one dnsmasq instance,
+inside uhttpd's default <code>script_timeout</code> of 60 s. The kernel apply and the
+reconcile of the restore also wait for netifd
+to restart a wireguard interface, 8 s each: a write of the network package
+stays inside 60 s, and a batch that also writes dhcp, with every reload at its
+bound, can pass it. The stop and the start of dnsmasq add nothing to these
+bounds. They run only when 10 s of the 20 s are left, each step ends within the
+20 s, and a check that ran before them ran inside the 20 s too. A write of one
+package that runs them answers within 20 s of its first reload, since nothing
+after them can fail and restore. With the default <code>config limits</code>, the worst
+write that runs them is a batch that also writes network: 20 s
+of reloads, checks and recovery, 8 s of the kernel apply, and when that fails,
+13 s of the checks after the restore and 8 s of the reconcile, 49 s. A <code>POST
+/uapi/batch</code> restore adds
+up to 5 s of flock wait for each further package that it writes back, and the
+<code>wg set</code> of a kernel apply or reconcile has no time bound: wg retries an
+endpoint name whose lookup fails for a time. busybox's <code>nslookup</code> runs under
+the lock of <code>network</code> too, about 5 s at most for each name server of
+<code>/etc/resolv.conf</code>, once for each peer with an endpoint name in the kernel apply
+and in the reconcile of the restore. A feed write waits for <code>apk update</code> up to
+<code>reload_budget_s</code>, but <code>apk add</code> and <code>apk del</code> have no total bound
+(<code>docs/non-uci-state.md</code>). uapi does not read
+<code>script_timeout</code>. Set it lower, through <code>uhttpd/instances</code> or otherwise, and
+uhttpd can kill such a request before its restore or its answer: the client
+gets a 502, and uci keeps whatever the write had reached. Keep it at 60 s or
+above on a router that uapi manages.</p>
+<p>A LuCI save or a <code>uci commit</code> in a shell takes no uapi lock. When such a
+commit lands in the package while uapi reloads it, and the reload then fails,
+uapi leaves the package as that writer left it, and answers <code>500
+reload_failed_unrecovered</code>, whose <code>restore_error</code> names the package. The daemon
+keeps what the failed reload gave it, so check the package and reload it by
+hand. In a <code>POST /uapi/batch</code>, uapi restores the other packages.
+<code>docs/architecture.md</code> § Transaction recipe, step 8, has the details.</p>
+<p>For high-stakes writes (the management interface, firewall defaults,
+uhttpd itself) verify convergence out-of-band: poll the <code>runtime</code> block
+on the resource you just modified, check ubus state, or simply ping the
+box and confirm reachability. uapi cannot do this for you; the init
+script doesn't know either.</p>
+<p>A commit-confirmed mode, which reverts a write that no client confirms, would
+close this gap. It is deferred, and <code>docs/commit-confirm.md</code> says why.</p>
+<h2 id="ntp">NTP</h2>
+<p>Audit logs and request IDs both encode timestamps. If the router's clock is
+wrong, those timestamps are wrong, and correlating events across machines
+breaks.</p>
+<p>OpenWrt ships an SNTP client (<code>sysntpd</code>) enabled by default. Confirm it is
+running and has synced:</p>
+<pre><code class="language-sh">/etc/init.d/sysntpd status
+date
+</code></pre>
+<p>If the router has no internet during boot (or you ship a different time source),
+point sysntpd at it via <code>uci set system.ntp.server=...</code>.</p>
+<h2 id="persistent-syslog">Persistent syslog</h2>
+<p>By default <code>logd</code> keeps the log ring in memory (default size 16 KiB) and loses
+it on reboot. For any router serving uapi in production, configure persistent
+logging:</p>
+<pre><code class="language-sh">uci set system.@system[0].log_file='/var/log/messages'
+uci set system.@system[0].log_size='2048'      # KiB; tune to flash health
+uci commit system
+/etc/init.d/log restart
+</code></pre>
+<p>This writes the in-memory ring through to flash, surviving reboots. Mind flash
+wear: 2-4 MiB is typical; full-time access logging is not appropriate for flash
+without external storage.</p>
+<p>For longer retention, mount a USB stick or remote filesystem and point
+<code>log_file</code> there.</p>
+<h2 id="forwarding-audit-logs-off-box">Forwarding audit logs off-box</h2>
+<p>uapi emits one syslog line per successful write under the <code>daemon.notice</code>
+priority. Forward to a central collector for tamper-resistant audit trails:</p>
+<pre><code class="language-sh">uci set system.@system[0].log_ip='10.0.0.5'        # syslog collector IP
+uci set system.@system[0].log_port='514'
+uci set system.@system[0].log_proto='udp'          # or 'tcp' for reliability
+uci commit system
+/etc/init.d/log restart
+</code></pre>
+<p>The receiving collector (rsyslog, syslog-ng, Loki, Splunk, etc.) can filter on
+the syslog tag <code>uapi</code>, which a line shows as <code>uapi[&lt;pid&gt;]:</code>, to isolate API
+audit events.</p>
+<h2 id="log-categories">Log categories</h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>syslog severity</th>
+<th>Default</th>
+<th>Triggers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AUDIT</td>
+<td>NOTICE</td>
+<td>on</td>
+<td>Successful writes (POST/PUT/PATCH/DELETE 2xx)</td>
+</tr>
+<tr>
+<td>ERROR</td>
+<td>WARN / ERR</td>
+<td>on</td>
+<td>Auth failures (401/403), all 5xx</td>
+</tr>
+<tr>
+<td>ACCESS</td>
+<td>INFO</td>
+<td>off</td>
+<td>Every request (non-<code>/healthz</code>)</td>
+</tr>
+<tr>
+<td>DEBUG</td>
+<td>DEBUG</td>
+<td>off</td>
+<td>Per-ubus-call tracing</td>
+</tr>
+</tbody>
+</table>
+<p><code>/healthz</code> is excluded from all categories so monitoring traffic does not drown
+out the audit trail. Non-auth 4xx responses (404, 405, 409, 422, 423) are not
+logged: the client receives the error directly and there is no
+operator-actionable signal in volume.</p>
+<p>ACCESS and DEBUG are off by default. Turn them on in <code>/etc/config/uapi</code>:</p>
+<pre><code>config logging
+    option access '1'   # log every request (INFO)
+    option debug '1'    # per-ubus-call tracing (DEBUG)
+</code></pre>
+<p>Leave these off unless you're debugging. They are noisy and will fill the
+in-memory ring quickly.</p>
+<h2 id="log-line-format">Log line format</h2>
+<p>Plain text, fixed field order, syslog-native (chosen over JSON-per-line because
+<code>logread</code> is the primary consumer):</p>
+<pre><code>uapi[&lt;pid&gt;]: &lt;request_id&gt; &lt;token_name|-&gt; &lt;category&gt; &lt;code|-&gt; &lt;method&gt; &lt;path&gt; &lt;status&gt; [&lt;duration_ms&gt;ms]
+</code></pre>
+<ul>
+<li><code>request_id</code>: ULID; also returned in the <code>X-Request-Id</code> response header. The
+  link between server-side log and client-visible response.</li>
+<li><code>token_name</code>: never the token value. <code>-</code> when the request has no valid
+  token, as on a 401. A 403 or a 5xx with a valid token logs its name.</li>
+<li><code>category</code>: <code>AUDIT</code> (writes), <code>ACCESS</code> (every request, if enabled), <code>WARN</code>
+  (401/403 auth failures), <code>ERROR</code> (5xx).</li>
+<li><code>code</code>: error code on failures, <code>-</code> on successful writes.</li>
+<li><code>path</code>: uhttpd's <code>PATH_INFO</code>, so the <code>/api/v4</code> mount prefix is already
+  stripped. A client's <code>POST /api/v4/firewall/rules</code> logs as <code>/firewall/rules</code>.</li>
+</ul>
+<p>A <code>POST /uapi/batch</code> logs one line for the whole request. The id of a
+sub-request, <code>&lt;request_id&gt;.&lt;index&gt;</code>, shows only in the <code>headers</code> of its entry
+in the 207 <code>results</code> and in <code>recent_errors</code> of <code>/uapi/diagnostics</code>.</p>
+<h2 id="sample-syslog-output">Sample syslog output</h2>
+<pre><code># AUDIT: a successful POST that created a firewall rule
+uapi[1234]: 01HX1234567890ABCDEFGHJKMN tf-prod AUDIT - POST /firewall/rules 200 [42ms]
+
+# ERROR (5xx)
+uapi[1234]: 01HX234567890ABCDEFGHJKMNN tf-prod ERROR reload_failed_restored PUT /network/interfaces/wan 500 [3120ms]
+
+# WARN (auth failure)
+uapi[1234]: 01HX34567890ABCDEFGHJKMNNN - WARN unauthorized GET /system 401 [1ms]
+
+# ACCESS (only when option access '1' is set)
+uapi[1234]: 01HX4567890ABCDEFGHJKMNNNN tf-readonly ACCESS - GET /firewall/rules 200 [8ms]
+
+# DEBUG (only when option debug '1' is set; per ubus.call)
+uapi[1234]: uapi-bus call system.info args={}
+
+# Internal error from the top-level exception handler
+uapi[1234]: uapi-internal 01HX567890ABCDEFGHJKMNNNNN: Type error: ...
+
+# Insecure-bypass marker triggered
+uapi[1234]: uapi-insecure-bypass 01HX67890ABCDEFGHJKMNNNNNN GET /system status=200 remote=10.0.2.2
+
+# A request body that missed the read deadline
+uapi[1234]: uapi-body-deadline 01HX7890ABCDEFGHJKMNNNNNNN POST /firewall/rules status=400 remote=10.0.2.2
+</code></pre>
+<h2 id="metrics">Metrics</h2>
+<p><code>GET /api/v4/uapi/metrics</code> returns Prometheus 0.0.4 text. Scope:
+<code>uapi:metrics:ro</code> (covered by <code>*:ro</code>). Counters and histograms are file-backed
+under <code>/var/run/uapi-metrics/</code> (tmpfs - resets on reboot, which is fine for
+operational counters; aggregate longer-term retention server-side).
+A package install or upgrade resets them too, and Prometheus reads that
+as a counter reset.</p>
+<p>Series:</p>
+<table>
+<thead>
+<tr>
+<th>Series</th>
+<th>Type</th>
+<th>Labels</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>uapi_requests_total</code></td>
+<td>counter</td>
+<td><code>method</code>, <code>path</code> (template, e.g. <code>/firewall/rules/:id</code>, or <code>unmatched</code>), <code>status</code>, <code>token_id</code> (<code>-</code> if pre-auth, <code>-retired</code> for tokens that no longer authenticate)</td>
+</tr>
+<tr>
+<td><code>uapi_request_duration_seconds_bucket</code></td>
+<td>histogram</td>
+<td><code>method</code>, <code>path</code>, <code>le</code></td>
+</tr>
+<tr>
+<td><code>uapi_request_duration_seconds_count</code></td>
+<td>counter</td>
+<td><code>method</code>, <code>path</code></td>
+</tr>
+<tr>
+<td><code>uapi_rate_limit_drops_total</code></td>
+<td>counter</td>
+<td><code>token_id</code> (<code>-retired</code> as above)</td>
+</tr>
+<tr>
+<td><code>uapi_lock_contention_total</code></td>
+<td>counter</td>
+<td><code>lock_type</code></td>
+</tr>
+<tr>
+<td><code>uapi_validate_errors_total</code></td>
+<td>counter</td>
+<td><code>resource</code>, <code>code</code></td>
+</tr>
+</tbody>
+</table>
+<p>Path templates are normalized (<code>/firewall/rules/:id</code> not the concrete
+ULID) to keep label cardinality bounded as clients create/destroy
+resources. A path that no route serves records <code>path="unmatched"</code>, and a
+<code>/raw</code> path keeps its package only when <code>/etc/config</code> holds it. Pre-auth
+failures (401 before authorize completes) carry <code>token_id="-"</code> so the
+series row still aggregates. A counter file that holds no count, which a
+full <code>/tmp</code> could leave behind, is left out of a scrape and starts again
+at its next increment.</p>
+<p>The <code>token_id</code> label is not bounded by the operator, because a client can
+mint a token per run, as the Terraform provider's ephemeral <code>uapi_token</code>
+does. A mint and a revoke bound it, over HTTP and with <code>uapi-token</code>, under
+the lock of the <code>uapi</code> package. Each one folds every series of a token
+that no longer authenticates (revoked, expired, or deleted from
+<code>/etc/config/uapi</code> by hand) into the series with the same other labels and
+<code>token_id="-retired"</code>, which no token can be named. The count is added
+there, and the token's file is deleted once the added count is on disk. A
+mint, over HTTP and with <code>uapi-token create</code>, folds before its commit, so
+that a request that uhttpd kills during the fold cannot lose the bearer of a
+token that it committed. A revoke folds after its commit. The values of
+<code>token_id</code> are then the tokens that still authenticated at the last mint or
+revoke, <code>-</code> and <code>-retired</code>, and two kinds that the next mint or revoke
+folds: a token that revoked itself, as its revoke is recorded after the
+fold, and a token with a request in flight at its revoke. A client that
+mints tokens with no expiry and never revokes them keeps every one of them
+live, and nothing bounds those.</p>
+<p>What a scrape sees at a fold: the token's series is gone, and the
+<code>-retired</code> series of the same method, path and status has grown by the
+token's count. Folds run one at a time under the lock, so none of them
+loses an update of <code>-retired</code>. A sum over <code>token_id</code>, such as
+<code>sum without (token_id) (uapi_requests_total)</code>, keeps its value across a
+fold, with three exceptions:</p>
+<ul>
+<li>A scrape that overlaps a fold can count the token twice, or leave it
+  out, and a recording rule that sums before <code>rate()</code> reads the second
+  case as a counter reset.</li>
+<li>A request of the token that is in flight at its revoke can write the
+  token's series again after the fold, and the next fold adds that count
+  again, so it is counted twice.</li>
+<li>A kill between the add and the delete counts the token twice at the
+  next fold in the same way.</li>
+</ul>
+<p>The requests of a token that a scrape saw once or never, which is usual
+for a token per run, reach Prometheus through <code>-retired</code>, but only once
+that series exists. The first fold into a label set creates the <code>-retired</code>
+series at the token's count, and <code>rate()</code> does not count the first value
+of a series, so those requests show only in the sum. The cost is with
+<code>rate()</code>: it reads each later fold as requests at the moment of the fold,
+so <code>sum(rate(uapi_requests_total[5m]))</code> shows a spike after a mint or a
+revoke, and counts a second time the part of a token's requests that its
+own series already showed. For a long-lived token that is revoked, that is
+most of its history at once. Deleting the series instead would have kept
+the requests of a short-lived token out of <code>rate()</code>, and made each sum
+fall at a revoke, which a recording rule that sums before <code>rate()</code> reads
+as a counter reset.</p>
+<p>Sample Prometheus scrape config:</p>
+<pre><code class="language-yaml">scrape_configs:
+  - job_name: uapi
+    scrape_interval: 30s
+    metrics_path: /api/v4/uapi/metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: &lt;metrics-token&gt;
+    static_configs:
+      - targets: ['router.example.com']
+</code></pre>
+<p>For broader router-level metrics (load, memory, network counters), the
+curated <code>prometheus_node_exporter_lua/config</code> resource manages
+node_exporter's config separately.</p>
+<h2 id="rate-limiting">Rate limiting</h2>
+<p>Per-token token-bucket, file-backed at <code>/var/run/uapi-ratelimit/&lt;token&gt;.txt</code>.
+A token whose name is longer than 63 characters, which only <code>uapi-token</code>
+can create, has its bucket under the sha256 of its name instead.
+Defaults: <strong>100 req/s, burst 200</strong> per token. Tune globally via
+<code>/etc/config/uapi</code>:</p>
+<pre><code>config ratelimit
+    option rate '500'
+    option burst '1000'
+</code></pre>
+<p>No reload needed; the config is read on each authed request.</p>
+<p>Per-token overrides win over global: <code>uci set uapi.&lt;token&gt;.rate='10'</code>,
+<code>uci set uapi.&lt;token&gt;.burst='20'</code>. Useful for noisy CI tokens that
+shouldn't share the global budget.</p>
+<p>Exceeded rate returns <code>429 too_many_requests</code> with <code>Retry-After: &lt;seconds&gt;</code>.
+The drop is counted in <code>uapi_rate_limit_drops_total{token_id}</code> for
+operator visibility. Rate limit is a defense-in-depth abuse guard, not a
+security control on its own; use <code>allowed_cidrs</code> on the token for actual
+source-IP enforcement.</p>
+<h2 id="request-limits">Request limits</h2>
+<p>The request bounds are read per request from <code>config limits</code> in
+<code>/etc/config/uapi</code>; no reload is needed. An option can lower a bound, not raise
+it: the body is parsed before the bearer check, so a raised body bound would let
+a
+request without a token make the parse take hundreds of MB, and the time bounds
+at
+their defaults already fill uhttpd's 60 s. The defaults below are the highest
+accepted values, and the fallback when an option is absent or outside its range:</p>
+<pre><code>config limits
+    option max_body_bytes '262144'
+    option max_body_containers '2000'
+    option body_read_s '10'
+    option reload_budget_s '20'
+</code></pre>
+<ul>
+<li><code>max_body_bytes</code> (4096..262144): largest request body accepted. A larger
+  <code>Content-Length</code> answers 413 before any read.</li>
+<li><code>max_body_containers</code> (16..2000): largest number of <code>{</code> and <code>[</code> characters
+  in a body, which bounds the <code>json()</code> parse.</li>
+<li><code>body_read_s</code> (1..10): deadline for a body to arrive in full, and for the
+  drain of a body no handler read.</li>
+<li><code>reload_budget_s</code> (1..20): total time a write waits for its daemon reloads,
+  after which the write answers <code>X-Reload-Status: unverified</code> instead of
+  waiting longer. A write of <code>packages/installed</code> or <code>packages/feeds</code> passes it
+  to apk as <code>--timeout</code>, and kills <code>apk update</code> after it
+  (<code>docs/non-uci-state.md</code>).</li>
+</ul>
+<p><code>GET /uapi/diagnostics</code> reports the effective values under <code>limits</code>.</p>
+<h2 id="diagnostics">Diagnostics</h2>
+<p><code>GET /api/v4/uapi/diagnostics</code> returns version, uptime, loaded resources,
+the uapi lock files present under <code>/var/lock</code>, whether uapi uses each
+state directory under <code>/var/run</code>, the effective request limits, the writes
+that a killed request left half done, and the last 20 error envelopes. Scope:
+<code>uapi:diagnostics:ro</code>.</p>
+<pre><code class="language-json">{
+  &quot;version&quot;: &quot;4.0.0&quot;,
+  &quot;uptime_seconds&quot;: 123456,
+  &quot;resources_loaded&quot;: [&quot;firewall:rules&quot;, &quot;firewall:zones&quot;, &quot;...&quot;],
+  &quot;lock_state&quot;: {
+    &quot;global_held&quot;: false,
+    &quot;per_package&quot;: {}
+  },
+  &quot;state_dirs&quot;: {
+    &quot;/var/run/uapi-error-ring&quot;: true,
+    &quot;/var/run/uapi-idempotency&quot;: true,
+    &quot;/var/run/uapi-interrupted-writes&quot;: true,
+    &quot;/var/run/uapi-metrics&quot;: true,
+    &quot;/var/run/uapi-ratelimit&quot;: true,
+    &quot;/var/run/uapi-token-update&quot;: true
+  },
+  &quot;limits&quot;: {
+    &quot;max_body_bytes&quot;: 262144,
+    &quot;max_body_containers&quot;: 2000,
+    &quot;body_read_s&quot;: 10,
+    &quot;reload_budget_s&quot;: 20
+  },
+  &quot;interrupted_writes&quot;: [],
+  &quot;stopped_instances&quot;: [],
+  &quot;recent_errors&quot;: [
+    { &quot;ts&quot;: 1780510463, &quot;request_id&quot;: &quot;01HX...&quot;, &quot;code&quot;: &quot;validation_failed&quot;,
+      &quot;status&quot;: 422, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/firewall/rules&quot;,
+      &quot;message&quot;: &quot;Request body failed validation&quot; }
+  ],
+  &quot;request_id&quot;: &quot;01HX...&quot;
+}
+</code></pre>
+<h3 id="finding-sections-a-write-would-reject-validate1">Finding sections a write would reject (<code>?validate=1</code>)</h3>
+<p><code>GET /api/v4/uapi/diagnostics?validate=1</code> adds a validation sweep: every section
+of every resource the token may read is run through the same checks as a write,
+and each section that holds an error is reported with the reason. Each write of
+such a section answers <code>422</code> until it fixes each error, or the change goes
+through <code>/raw</code>. A <code>validate</code> other than <code>1</code> answers 400 <code>bad_request</code>.</p>
+<pre><code class="language-json">{
+  &quot;invalid_sections&quot;: [
+    { &quot;resource&quot;: &quot;firewall/rules&quot;, &quot;id&quot;: &quot;sweepbad&quot;, &quot;managed&quot;: true,
+      &quot;errors&quot;: [ { &quot;field&quot;: &quot;match.proto&quot;, &quot;code&quot;: &quot;conflict&quot;,
+                    &quot;message&quot;: &quot;firewall4 keeps a port match only on tcp or udp, so this rule would match the whole protocol instead&quot; } ] }
+  ],
+  &quot;swept_resources&quot;: [&quot;firewall:defaults&quot;, &quot;firewall:rules&quot;, &quot;...&quot;],
+  &quot;skipped_for_scope&quot;: []
+}
+</code></pre>
+<p>It answers "which sections on this router will stop being accepted" before an
+upgrade, rather than one <code>422</code> at a time during a write. Every section it
+reports
+is already broken on the router: the rule above is already matching a whole
+protocol rather than a port. The sweep is the first time anyone is told.</p>
+<p>A value that the platform takes and that uapi does not write is not listed. An
+interface on a proto that uapi does not model, such as the <code>6in4</code> that LuCI
+writes or the <code>qmi</code> that an LTE router ships, takes a PATCH that leaves <code>proto</code>
+out, and a <code>wireless/interfaces</code> text option that uci holds as a list reads as
+an array. Only a write that changes a field to such a value is refused: a write
+that sends back the value that the section holds, as a PUT of the read does,
+passes, with two exceptions. A request that names such a <code>proto</code> answers 422
+<code>not_in_enum</code>, also when it sends the stored proto, because a PUT would delete
+the options that its handler reads. So a PUT of the read of such an interface
+fails, and only a PATCH that leaves <code>proto</code> out can change it and keep its
+proto. A PUT also answers 422 for the <code>HELPER</code> target that LuCI writes on a
+firewall rule with its <code>set_helper</code> option, which uapi does not model and a PUT
+removes.</p>
+<p>A <code>validate_new()</code> rule (<code>docs/adding-a-resource.md</code>) is not a break,
+until the daemon reads the value. Another writer can store a value that such a
+rule refuses, and the sweep lists it whether the daemon reads it yet or not: the
+section can be disabled, its mode can leave the field unused, or the radio of an
+SSID can be disabled. Each error of such a rule has <code>live</code>, which is <code>false</code>
+when the daemon does not read the value yet. A write of the section is refused
+for the error either way, because another writer, such as LuCI, can enable the
+section later.</p>
+<p>The sweep also lists a <code>network/wireguard_peers</code> peer that keeps its interface
+down, because wg refuses the config of the whole interface for one of its
+values, with code <code>conflict</code> on the field <code>""</code> and a message that names the
+interface and the fields. A write of another peer of that interface names it
+in <code>X-Kernel-Blocked</code>. A write of the peer is refused for each such value that
+a write refuses, so the write that fixes them clears the finding. An IPv6
+link-local host whose %zone names no interface of the router keeps the
+interface down too, and is not refused, because an interface can exist at one
+time and not at another, so the peer still takes a write while it holds one.</p>
+<p>Three things worth knowing:</p>
+<ul>
+<li><strong>Opt-in on purpose.</strong> Each resource walks its own uci package, so a package
+  is traversed once per resource that lives in it, six times for <code>firewall</code> and
+  <code>network</code>. The cost therefore scales with the number of sections in the
+  configuration, not with a fixed overhead: the 42 resources that it sweeps
+  over a stock-sized configuration measured about 90 ms, and a router with a
+  large firewall will be slower. <code>/uapi/diagnostics</code> is what a monitoring
+  system polls on an interval, so without <code>?validate=1</code> the response is
+  unchanged and costs nothing extra.</li>
+<li><strong>Scoped per resource.</strong> The endpoint needs <code>uapi:diagnostics:ro</code>, and each
+  resource is included only if the token also permits <code>:ro</code> on it, because the
+  findings name sections and quote configured values. A token with only
+  <code>uapi:diagnostics:ro</code> therefore sweeps nothing, which is why
+  <code>skipped_for_scope</code> exists: an empty <code>invalid_sections</code> with a long
+  <code>skipped_for_scope</code> means "not allowed to look", not "nothing wrong".</li>
+<li><strong>Read-only and side-effect free</strong>, so it is safe to run against production,
+  which is exactly when it is most wanted.</li>
+</ul>
+<p>One finding shape differs. If a resource's sweep itself fails, the entry reports
+<code>code: "sweep_failed"</code> with <code>id</code> and <code>managed</code> both <code>null</code>, because there is no
+section to name:</p>
+<pre><code class="language-json">{ &quot;resource&quot;: &quot;firewall/rules&quot;, &quot;id&quot;: null, &quot;managed&quot;: null,
+  &quot;errors&quot;: [ { &quot;field&quot;: &quot;&quot;, &quot;code&quot;: &quot;sweep_failed&quot;, &quot;message&quot;: &quot;...&quot; } ] }
+</code></pre>
+<p>That is deliberately a finding rather than a failed request: a resource that
+could
+not be checked must not be reported as clean.</p>
+<p><code>dhcp/leases</code> and <code>network/wireguard_kernel_peers</code> are not swept. They are
+read-only views of daemon state with no validation to run.</p>
+<p>The <code>recent_errors</code> ring is best-effort: writes to <code>/var/run/uapi-error-ring/</code>
+must never disrupt the actual response, so a disk-full or permission
+failure simply produces an empty ring rather than a 5xx on the original
+request. The ring caps at 20 entries (oldest dropped first), and keeps the
+first 512 bytes of each message, ending a cut one with <code>...</code>: a 400 for a
+control character in a body names the key before authentication, so an
+unclipped message let any client store a body of any size in RAM.</p>
+<p><code>lock_state</code> reports which uapi lock files exist under <code>/var/lock</code>, not
+which locks are held right now: <code>flock</code> is released when the fd closes
+and the file itself is never unlinked, so an entry means that package
+has been written at least once since the lock directory was last
+cleared.</p>
+<p><code>state_dirs</code> reports each state directory under <code>/var/run</code>, keyed by its
+path, as uapi finds it. The read of <code>state_dirs</code> creates and changes nothing.</p>
+<ul>
+<li><code>true</code>: a directory that the effective uid of the request process owns,
+  with mode 0700. uapi writes there.</li>
+<li><code>false</code>: the path holds anything else, and uapi does not use it as it
+  stands. A directory that uapi narrows to 0700 at its next write there, as
+  <code>docs/architecture.md</code> § Where state lives describes, reads <code>false</code> until
+  that write.</li>
+<li><code>null</code>: the path does not exist yet. uapi creates it at its first write
+  there.</li>
+</ul>
+<p>The request that reads it has already changed two of them. Its rate-limit
+check and its last-used stamp create <code>/var/run/uapi-ratelimit</code> and
+<code>/var/run/uapi-token-update</code> and narrow them to 0700, so these two read <code>true</code>,
+or <code>false</code> when uapi cannot own them, and never <code>null</code>. The read of
+<code>recent_errors</code> that follows creates <code>/var/run/uapi-error-ring</code>, so it reads
+<code>null</code> only until the first error or the first read of <code>/uapi/diagnostics</code>.</p>
+<p><code>true</code> does not promise free space. On a full tmpfs the rate limiter allows
+every request, and the idempotency cache, the metrics and the error ring
+keep no new entry. What <code>false</code> costs while it lasts:</p>
+<table>
+<thead>
+<tr>
+<th>Directory</th>
+<th>While it reads <code>false</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/var/run/uapi-ratelimit</code></td>
+<td>The rate limiter allows every request.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-idempotency</code></td>
+<td>A request with an <code>Idempotency-Key</code> replays nothing, so a retry runs again.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-metrics</code></td>
+<td><code>/uapi/metrics</code> records no series.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-error-ring</code></td>
+<td><code>recent_errors</code> stays empty.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-token-update</code></td>
+<td>No request stamps <code>last_used_at</code>.</td>
+</tr>
+<tr>
+<td><code>/var/run/uapi-interrupted-writes</code></td>
+<td>A write records nothing, so <code>interrupted_writes</code> cannot list it.</td>
+</tr>
+</tbody>
+</table>
+<p><code>interrupted_writes</code> lists the writes that uhttpd killed after their commit,
+when the client closed the connection or <code>script_timeout</code> ran out, and the
+writes that threw after it. Such a write landed in uci with no check, no
+restore and no answer. Each entry has the <code>pid</code> of the request process, its
+<code>request_id</code>, the <code>packages</code>, <code>staged</code> (the sections that it wrote, when
+known), <code>started_at</code> and <code>reload_started</code>. uapi only reports such a write, and
+neither finishes nor restores it. Check the packages that it names, then
+reload their daemons or write them again. A record stays until reboot or the
+next package upgrade.</p>
+<p><code>stopped_instances</code> lists each instance that procd gave up on after too many
+deaths soon after a start, and will not start again on its own, as
+<code>{"service": "dnsmasq", "instance": "cfg01411c"}</code>, the names of
+<code>X-Reload-Stopped</code>. It covers the services that <code>POST
+/uapi/services/{name}/recover</code> takes. procd lists such an instance not running
+and without its <code>respawn</code> table. An instance without respawn that ended, such as
+a one-shot job, looks the same in <code>service list</code>, so the instances of other
+services are not listed. A write that leaves dnsmasq so answers
+<code>X-Reload-Status: stopped</code>. The action below, or a start or a reload of the
+service, starts the instance again. The list is empty when there is none, and
+also when procd does not answer. Watch it, as the header of a write says it only
+once.</p>
+<h2 id="starting-again-a-service-that-procd-gave-up-on">Starting again a service that procd gave up on</h2>
+<p><code>POST /uapi/services/{name}/recover</code> starts again the instances that procd gave
+up on, for a client that only speaks HTTP. Use it after a write that answers
+<code>X-Reload-Status: stopped</code>, or when <code>stopped_instances</code> lists an instance. A
+write that changes nothing does not do it, because it runs no init script.</p>
+<pre><code class="language-sh">curl -X POST -H &quot;Authorization: Bearer $TOKEN&quot; \
+     https://router/api/v4/uapi/services/dnsmasq/recover
+# 200 with body:
+# { &quot;service&quot;: &quot;dnsmasq&quot;, &quot;recovered&quot;: [ &quot;cfg01411c&quot; ] }
+</code></pre>
+<p><code>{name}</code> takes the services that uapi reloads and whose init script sets
+<code>respawn</code> on every instance that it starts: <code>dnsmasq</code>, <code>lldpd</code>, <code>mwan3</code>,
+<code>odhcpd</code>, <code>prometheus-node-exporter-lua</code>, <code>snmpd</code>, <code>sysntpd</code>, <code>unbound</code> and
+<code>vnstat</code>. Another name answers <code>404 not_found</code>. <code>network</code>, <code>uhttpd</code> and
+<code>dropbear</code> are not in the list, because the stop acts on the whole service. A
+stop of <code>network</code> or <code>uhttpd</code> cuts off the request. A stop of <code>dropbear</code> stops
+the instance that serves the management SSH session, so a start that fails
+leaves the router without SSH.</p>
+<p>The token needs <code>uapi:services:rw</code>, or <code>rw</code> on a domain whose writes reload the
+service, such as <code>dhcp:rw</code> for <code>dnsmasq</code>, <code>odhcpd</code> and <code>unbound</code>. The spec lists
+the domains of each service.</p>
+<p>When procd gave up on no instance of the service, uapi stops and starts nothing
+and answers 200 with an empty <code>recovered</code>. So a retry is safe, and a service
+that runs, that the operator stopped or that the router lacks stays as it is.
+Otherwise uapi runs <code>/etc/init.d/&lt;name&gt; stop</code>, waits until procd lists no
+instance of the service, and runs <code>/etc/init.d/&lt;name&gt; start</code>, as a write does
+for dnsmasq. <strong>The stop and the start act on the whole service.</strong> Every
+instance of it stops and starts again, the ones that ran included, such as the
+other dnsmasq instances, so their clients see a short break. A start sends no
+SIGHUP, and procd counts the deaths of each new instance from zero. The steps
+have the bounds of the write: 3 s for the stop, 2 s for the wait and 5 s for the
+start, taken from <code>reload_budget_s</code>. With a <code>reload_budget_s</code> below 10, uapi
+skips them and answers 500. A stop still running after 3 s gets no start.</p>
+<p>The request takes the global lock shared and the lock of each package whose
+writes reload the service, as such a write does. It answers <code>423 locked</code> while
+such a write runs. Such a write, and a non-uci write such as a package install,
+answers 423 while the action runs, which takes 10 s at most.</p>
+<p>It answers 200 when every instance that procd had given up on runs after the
+start: <code>recovered</code> names them. It answers <code>500 recover_failed</code> when one is still
+down: <code>stopped</code> names each one, <code>service</code> names the service, and <code>message</code> says
+why, so a client needs no second call. Look at <code>logread</code> for the daemon then. A
+200 that carried an <code>Idempotency-Key</code> replays for 24 h.</p>
+<h2 id="management-path-warning">Management-path warning</h2>
+<p>The lockout this guards against is the one atomic writes cannot help with: a
+change that
+reloads cleanly and then severs the only path to the box. uapi warns rather than
+refuses,
+because renumbering the management VLAN or moving to an out-of-band path are
+legitimate
+things to do, and because LuCI warns rather than blocking on the same condition.</p>
+<p>Two places report it, and they answer different questions.</p>
+<p><code>GET /uapi/diagnostics</code> carries <code>management_path</code>, which names the interface
+this request arrived through:</p>
+<pre><code class="language-json">{ &quot;management_path&quot;: { &quot;address&quot;: &quot;192.168.0.236&quot;, &quot;device&quot;: &quot;eth1&quot;, &quot;interface&quot;: &quot;wan&quot; } }
+</code></pre>
+<p>That is the pre-flight answer. Ask it before a risky write, or have a wrapper
+ask it, and
+you know which interface not to touch. <code>interface</code> is <code>null</code> when the request
+arrives on a
+device no uci interface claims, which is honest rather than a guess.</p>
+<p>A write to <code>network/interfaces</code> gets <code>X-Mgmt-Path-Warning</code> when it moves that
+interface's
+<code>disabled</code>, <code>proto</code>, <code>ipaddrs</code> or <code>netmask</code>, or deletes it. <code>network/devices</code>
+and
+<code>network/bridge_vlans</code> are matched by device instead of by interface name, and
+report
+<code>device=&lt;name&gt;</code> when a create or a delete names the caller's own device, or a
+bridge that
+device is a port of. That is the after-the-fact
+answer, and it is worth having because most such writes do not actually break
+the path:
+the header tells an operator they are in a risky state while the connection
+still works.</p>
+<p>Its limit, stated plainly: if the write really does strand you, the response
+never
+arrives. This is not a safety net, it is a warning light. The scope is
+deliberately
+LuCI's: those four field names on the inbound interface, and no firewall
+analysis at all,
+because predicting a firewall lockout means modelling fw4 zone and rule
+ordering, and a
+guess dressed as a warning is worse than silence.</p>
+<p>The interface is derived from the kernel's own route lookup rather than by
+comparing the
+caller's address against each interface's configured prefixes. An operator
+reaching the
+box from another network sits inside no local prefix, and that is exactly the
+operator a
+write can strand, so containment arithmetic would report "unknown" for the case
+that
+matters most. The route lookup also answers for IPv6, where uapi's own prefix
+helpers are
+IPv4-only.</p>
+<h2 id="healthz">Healthz</h2>
+<pre><code class="language-sh">curl -k https://&lt;router&gt;/api/v4/healthz
+# 200 with body:
+# { &quot;status&quot;: &quot;ok&quot;, &quot;version&quot;: &quot;4.0.0&quot;,
+#   &quot;checks&quot;: { &quot;ubus&quot;: &quot;ok&quot;, &quot;uci&quot;: &quot;ok&quot;,
+#               &quot;lock_dir&quot;: &quot;ok&quot;, &quot;time_sync&quot;: &quot;ok&quot; } }
+# 503 with body:
+# { &quot;status&quot;: &quot;degraded&quot;, &quot;version&quot;: &quot;...&quot;, &quot;checks&quot;: {...},
+#   &quot;errors&quot;: [&quot;ubus: ...&quot;, &quot;time_sync: clock not synced (epoch below sanity floor)&quot;] }
+</code></pre>
+<p>No auth required; TLS-for-non-localhost still applies. Monitors should
+poll healthz (not a real endpoint) to avoid burning audit-log noise.
+<code>time_sync</code> returns <code>unknown</code> for the first 60 seconds after boot
+(uptime too short to tell), <code>degraded</code> if the wall clock is below the
+sanity floor of epoch 1700000000 (14 November 2023), otherwise <code>ok</code>.</p>
+<h3 id="version-is-a-stable-contract-field"><code>version</code> is a stable contract field</h3>
+<p>The <code>version</code> field returned by <code>/healthz</code> is the canonical
+version-skew probe. It carries the installed uapi package version (same
+string as <code>/usr/share/uapi/VERSION</code>) and is guaranteed to be present
+across every release within and across majors. Clients that need to
+detect API-skew before issuing real requests should read it from
+<code>/healthz</code> rather than parsing it from the URL or assuming it from the
+package they installed.</p>
+<h2 id="insecure-test-bypass">Insecure-test bypass</h2>
+<p>For closed-network testing only, creating <code>/etc/uapi.insecure</code> lets plain HTTP
+through from any client (the loopback bypass is always available; this opens it
+for remote hosts too). Every request that takes the bypass emits a syslog
+<code>NOTICE</code> line:</p>
+<pre><code>uapi-insecure-bypass &lt;request_id&gt; &lt;method&gt; &lt;path&gt; status=&lt;n&gt; remote=&lt;addr&gt;
+</code></pre>
+<p>so it shows up in <code>logread</code> and any remote-syslog collector. Delete the marker
+for production use.</p>
+<h2 id="request-body-deadline">Request body deadline</h2>
+<p>The body of a request has to arrive in full within 10 s of its start
+(<code>docs/security.md</code>, Public endpoints). Every request that misses the deadline
+emits a syslog <code>WARNING</code> line, on every path, with no body content:</p>
+<pre><code>uapi-body-deadline &lt;request_id&gt; &lt;method&gt; &lt;path&gt; status=&lt;n&gt; remote=&lt;addr&gt;
+</code></pre>
+<p>The status is the answer that the request got: <code>400</code> when uapi read the body and
+it did not arrive in full, or the normal answer of a request that answers
+without reading its body, such as a 413 or a GET with a declared body. Many such
+lines from one address are a client that holds the request slots of uhttpd.
+Without <code>ucode-mod-io</code> there is no deadline, and the handler logs one line when
+uhttpd starts:</p>
+<pre><code>uapi-body-deadline: ucode-mod-io is not installed, so a request body that does not arrive holds its request until the script timeout of uhttpd
+</code></pre>
+<h2 id="capacity">Capacity</h2>
+<p>uapi runs in-process inside uhttpd via uhttpd-mod-ucode. Each request is a
+forked CGI child. On low-end MIPS hardware, fork+ucode+ubus is in the tens of
+milliseconds per request; on modern aarch64/x86_64 it is sub-10ms. The intended
+workload is Terraform applies plus occasional curl, not high-volume RPC. If you
+need RPS in the hundreds, front uapi with a caching reverse proxy.</p>
+<h2 id="backups">Backups</h2>
+<p>The token store at <code>/etc/config/uapi</code> is the only uapi-specific state worth
+backing up beyond what you'd back up for OpenWrt itself (<code>sysupgrade
+--create-backup</code>). Treat it as a secret. The tokens within are hashed (so a
+leaked backup file doesn't directly expose bearers), but the salts + hashes
+still allow an offline brute-force on weak inputs; in practice the bearers are
+128 random bits so brute force is infeasible, but discipline still wins.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/operations.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/operations.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

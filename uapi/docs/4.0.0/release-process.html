@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uapi release process - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / uapi release process</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="uapi-release-process">uapi release process</h1>
+<p>What ships, who signs what, where it lands. This document is operator-facing;
+the high-level architectural contract lives in <code>CLAUDE.md</code>.</p>
+<h2 id="architecture-neutrality">Architecture neutrality</h2>
+<p>uapi is <code>PKGARCH:=all</code> (in <code>build/openwrt/uapi/Makefile</code>). The package
+contains no compiled code - only ucode scripts and shell glue - so the same
+<code>uapi-&lt;version&gt;-&lt;release&gt;.apk</code> is consumable by every OpenWrt host
+architecture (x86_64, aarch64, arm, mips, etc.) at the same OpenWrt major
+version. We do NOT build a separate APK per arch; the OpenWrt apk-tools
+install handles arch-neutral packages directly.</p>
+<p>The <code>package</code> job builds a single APK (against the x86_64 snapshot SDK of
+OpenWrt main, because x86_64 is the simplest to host on GitHub runners) and
+smoke-tests it in an x86 QEMU VM that boots the snapshot image of OpenWrt main,
+and the <code>release-apk</code> job attaches that one artifact to the GitHub Release.
+uapi 4.x supports OpenWrt main and the release cut from it, and not 25.12, so
+no job of the 4.x line uses a 25.12 SDK or image. The <code>v3</code> branch keeps its own
+<code>ci.yml</code>, which builds and tests 3.x on 25.12. The apk feed itself is rebuilt by
+<code>openwrt-iac/openwrt-iac.github.io</code>'s <code>publish.yml</code> workflow, which
+pulls the asset of the Release that GitHub marks Latest from each source
+repo listed in its <code>feed.yml</code>. uapi no longer owns a gh-pages feed of its own.</p>
+<p>The <code>verify-arch-build</code> matrix job cross-compiles against the SDKs for
+<code>aarch64_generic</code>, <code>arm_cortex-a7</code>, and <code>mips_24kc</code> on tag push. It does
+not prove arch-neutrality, despite what this said until 2.5.0: it
+compares no digests and has no x86_64 leg to compare against. It uses
+the snapshot SDKs of OpenWrt main, and fails the release, at an SDK
+download, on <code>sha256sums</code> without a valid signature of the OpenWrt
+snapshot key that <code>build/openwrt-snapshot-usign.pub</code> pins, on a tarball
+that does not match those sums, on a cross-build that breaks under any
+of the three, or on a build that produces no <code>.apk</code>. The matrix in
+<code>.github/workflows/ci.yml</code> names the targets, and <code>tools/openwrt-sdk.sh</code>
+resolves each SDK from the <code>sha256sums</code> of its target.</p>
+<h3 id="pre-tag-arch-validation">Pre-tag arch validation</h3>
+<p><code>verify-arch-build</code> also accepts <code>workflow_dispatch</code>, so you can validate
+the snapshot SDKs against a candidate without tagging:</p>
+<pre><code>gh workflow run ci.yml --ref main
+</code></pre>
+<p>Use <code>--ref v3</code> before a 3.x release. This fires the
+<code>unit + lint + integration + package + verify-arch-build</code>
+chain of a tag push, minus <code>release-apk</code>, which publishes, and minus the
+signature check of <code>package</code>, which runs only on a tag ref.
+The snapshot SDKs change daily, so run it on the day of the tag. A run
+on <code>main</code> also saves the three SDKs in the cache, which a tag can restore
+while the snapshot is the same. A tag saves none, because no other ref
+can read a cache that a tag saves.</p>
+<p>Operators who want a runtime per-arch smoke test (the CI matrix only
+verifies compile) can run
+<code>tests/integration/release_apk_smoke.sh &lt;path-to-apk&gt; [&lt;path-to-3.2.0-apk&gt;]</code>
+against their own arch's QEMU VM or live router. With the second argument
+it also upgrades from 3.2.0, the last release whose package shipped
+<code>/etc/config/uapi</code>.</p>
+<h2 id="versioning">Versioning</h2>
+<p><code>VERSION</code> at the repo root drives every other version string:</p>
+<ul>
+<li><code>build/openwrt/uapi/Makefile</code> reads it via <code>$(shell sed 's/-/_/g'
+  files/VERSION)</code>.</li>
+<li><code>build/gen_openapi.uc</code> reads it and stamps <code>info.version</code>.</li>
+<li><code>src/main.uc</code> reads it at parent VM startup; <code>/healthz</code> returns it.</li>
+<li>CI verifies the tag's signature, not its name: nothing compares the pushed
+  tag against the file, so that stays a manual checklist item below.</li>
+</ul>
+<p>Bump <code>VERSION</code>, regenerate <code>build/openapi.json</code> via <code>make openapi</code>, commit.</p>
+<h2 id="candidate-sweep-before-a-version-number-is-fixed">Candidate sweep before a version number is fixed</h2>
+<p>Once a release number is on the table, sweep for work that belongs in it before
+cutting the branch. The point is not to pad the release: it is that the bracket
+the number implies is decided at that moment, and something eligible left behind
+usually waits a whole cycle, while something ineligible slipped in forces a
+retag.</p>
+<p>Look at least at the open issues, the open PRs, <code>docs/roadmap.md</code>, and whatever
+is already sitting under <code>## [Unreleased]</code> in <code>CHANGELOG.md</code>. Also worth a
+glance: <code>docs/deprecations.md</code> when a removal window has come due, and anything
+previously parked as blocked upstream, since the blocker may have cleared.</p>
+<p>Filter each candidate through the bracket in <code>docs/versioning.md</code> rather than by
+how useful it is. A patch takes bug fixes with no surface change, plus the
+carve-out for a tightening whose old behaviour produced state no caller could
+rely on. A minor takes anything additive. Field deprecations are additive spec
+surface and belong in a minor even when the fix they accompany is a patch.</p>
+<p>Two things this catches, both seen in practice. Roadmap entries go stale: the
+hardening section once listed four items as outstanding that had all shipped,
+one of them a release earlier. And a fix can look patch-sized while carrying a
+minor-sized companion, which is how a header meant to report an apply outcome
+nearly rode along with the bug fix it belonged to.</p>
+<p>Record the outcome even when it is empty. "Swept, nothing eligible" is worth
+saying, because the next reader cannot tell a sweep that found nothing from a
+sweep that never happened.</p>
+<h2 id="major-preparation-branch">Major preparation branch</h2>
+<p>A major's breaking work lands on a preparation branch cut from <code>main</code> (<code>v4</code>
+for 4.x), not on <code>main</code> itself. Breaking-change PRs target the preparation
+branch. Additive and internal PRs keep targeting <code>main</code> and can ship in
+minors while the major is in flight.</p>
+<ul>
+<li>The preparation branch carries the same required checks as <code>main</code>: <code>unit</code>,
+  <code>lint</code>, <code>integration</code>, <code>entry</code> and <code>package</code>, with the branch up to date
+  before the merge (strict). Create the ruleset when the branch is created,
+  by copying the <code>main</code> ruleset and setting its name to
+  <code>&lt;branch&gt;: required checks</code> and its <code>conditions.ref_name.include</code> to
+  <code>["refs/heads/&lt;branch&gt;"]</code>. Every future major preparation branch gets the
+  same ruleset. The two rulesets differ in one thing: the <code>main</code> ruleset has
+  no bypass actor, so nobody can bypass it, and the preparation branch
+  ruleset lets the repository admin role bypass it (<code>actor_type:
+  "RepositoryRole"</code>, <code>actor_id: 5</code>, <code>bypass_mode: "always"</code>). The checks stay
+  required on pull requests to the branch, and an admin can push the branch
+  directly for the rebases below (without the bypass, a ruleset on a branch
+  rejects direct pushes).</li>
+<li>Rebase the preparation branch onto <code>main</code> after every merge into <code>main</code>,
+  so breaking PRs start from a current base and conflicts stay small.</li>
+<li>Until the release, the preparation branch still serves the current API
+  prefix. The mount move is the last commit before the tag.</li>
+<li>At release time: cut the maintenance branch of the old major from <code>main</code>
+  (<code>v3</code> for 3.x), with a copy of the <code>main</code> ruleset that has no bypass actor.
+  Rebase the preparation branch onto <code>main</code> one last time, merge it into
+  <code>main</code>, delete it and its ruleset, then run the release flow below. From then,
+  a fix of the old major lands on its maintenance branch by PR, and is carried
+  to <code>main</code> when it applies there. The old major's releases are tagged on its
+  maintenance branch. After such a tag, copy the new section of its
+  <code>CHANGELOG.md</code> into the one of <code>main</code>, and take out of the <code>[Unreleased]</code>
+  of <code>main</code> each entry that the section carries, so the released sections of
+  both branches carry the same entries. A carried entry keeps the number of
+  its <code>main</code> PR at its end (see Changelog below).</li>
+</ul>
+<p><code>v4</code> went through this on 2026-11-21: <code>main</code> carries 4.x, and <code>v3</code> carries 3.x
+from 3.5.0 on.</p>
+<h2 id="release-flow">Release flow</h2>
+<h3 id="no-release-candidate-while-uapi-has-few-users">No release candidate while uapi has few users</h3>
+<p>uapi cuts no release candidate while it has few declared users. Before a
+major, the maintainers of the downstream clients, the Terraform provider and
+uapi-mcp, review the migration guide and the spec of <code>main</code>. uapi fixes what
+they report before the tag. An RC makes sense again when uapi is in the
+official OpenWrt package feeds and has outside users.</p>
+<p>The RC mechanism stays for that time. The release-apk workflow auto-detects
+<code>-rc/-alpha/-beta/-pre</code> and marks the GitHub release as a prerelease (its
+<code>case "$TAG" in *-rc*|*-alpha*|*-beta*|*-pre*) PRE=--prerelease ;;</code> block).</p>
+<p><strong>RCs do NOT publish to the apk feed.</strong> The feed aggregator at
+<code>openwrt-iac/openwrt-iac.github.io</code> and its site take the GitHub Release
+of each source repo that GitHub marks Latest, from <code>gh release list
+--exclude-pre-releases --exclude-drafts</code>. Until
+openwrt-iac/openwrt-iac.github.io#8 they took the newest release of that
+list. A prerelease never carries the mark, and the list leaves it out at
+the source. <code>release-apk</code> marks a stable release Latest only when its
+version is the highest, so a 3.x release after 4.0.0 leaves the mark on
+4.x. RCs go to the uapi GitHub
+Release page only, marked <code>--prerelease</code>; operators who want to
+install one download the APK from the release page and
+<code>apk add --allow-untrusted /tmp/uapi-&lt;rc&gt;.apk</code> deliberately. Same
+path the maintainer uses to dogfood the RC on the live router.</p>
+<p>Per-release steps (operator does these in order). A 3.x release takes the
+same steps on <code>v3</code>: its PR targets <code>v3</code>, its tag goes on <code>v3</code>, and each step
+that names <code>main</code> names <code>v3</code> for it.</p>
+<ol>
+<li><strong>Cut a release branch</strong>, <code>release/v&lt;version&gt;</code>. For a major, do the
+   downstream review above first.</li>
+<li><strong>Update <code>VERSION</code></strong> to the target value. <strong>Regenerate</strong> the OpenAPI:
+   <code>make openapi</code>. Commit.</li>
+<li><strong>Close the changelog section.</strong> Run <code>scripts/changelog-missing.sh
+   &lt;previous-tag&gt; &lt;line&gt;</code>, where <code>&lt;line&gt;</code> is the branch that the release is
+   tagged on (<code>main</code> for 4.x, <code>v3</code> for 3.x), and fix whatever it lists. On
+   that branch itself the script takes it as the default, and on a topic
+   branch it refuses to guess. Then rename <code>## [Unreleased]</code>
+   to <code>## [x.y.z] - &lt;date&gt;</code>, and put an empty <code>## [Unreleased]</code> above it. The
+   release PR takes the <code>changelog-not-needed</code> label, because it moves
+   entries rather than adds one. Commit.</li>
+<li><strong>Run the full test suite locally</strong>: <code>make test coverage</code>. The CI runs
+   <code>make lint test-unit coverage</code> plus the integration / soak / bench
+   suite, so a green local <code>make test coverage</code> is necessary but not
+   sufficient.</li>
+<li><strong>Open PR, get CI green</strong>: lint + unit + coverage gate + integration +
+   soak (RSS/fd growth thresholds) + bench, and the <code>package</code> job, which the
+   change of <code>VERSION</code> triggers, so the APK and the upgrades from 3.2.0 are
+   tested before the tag exists. <code>package</code> is a required check, so a red
+   <code>package</code> blocks the merge. The bench measures and reports per-endpoint
+   p99; it does not gate, because no
+   baseline is committed. Read the numbers in the run log or the <code>bench-run</code>
+   artifact if a release is expected to move latency.</li>
+<li><strong>Merge</strong> into <code>main</code> for 4.x, or into <code>v3</code> for 3.x.</li>
+<li><strong>Sign and push the tag</strong>:
+   <code>git tag -s v2.0.0 -m "v2.0.0"
+   git push origin v2.0.0</code>
+   The tag MUST be signed with a GPG key whose public block is in
+   <code>.github/release-signers.asc</code>. Set up once locally:
+   <code>git config --global user.signingkey &lt;YOUR-GPG-FINGERPRINT&gt;
+   git config --global tag.gpgsign true
+   gpg --armor --export &lt;YOUR-GPG-FINGERPRINT&gt; &gt; .github/release-signers.asc
+   git add .github/release-signers.asc &amp;&amp; git commit -m "release: trust &lt;fingerprint&gt;"
+   git push</code>
+   On a tag, CI's package job runs <code>git verify-tag</code> first; an unsigned tag (or a
+   tag from a signer not in the allowed list) fails <code>package</code> before it
+   builds anything, so <code>release-apk</code> creates no GitHub Release. Only the
+   Release is withheld: <code>integration</code> still uploads <code>bench-run</code>, and
+   <code>verify-arch-build</code> still uploads its per-arch APKs as workflow artifacts.</li>
+<li><strong>Watch the tag's CI run.</strong> The <code>package</code> job runs (in order):
+   - tag signature verification
+   - resolution of the x86_64 snapshot SDK of OpenWrt main from its
+     <code>sha256sums</code>
+   - on a miss of the SDK cache, SDK download, with the signature of the
+     <code>sha256sums</code> checked against <code>build/openwrt-snapshot-usign.pub</code> and the
+     tarball checked against the sums
+   - <code>make stage</code> (populate <code>build/openwrt/uapi/files</code>)
+   - <code>make package/uapi/compile</code> in the SDK
+   - APK and SBOM upload as workflow artifacts
+   - VM smoke test (<code>tests/integration/release_apk_smoke.sh</code>) on the snapshot
+     image of OpenWrt main, including the upgrade from the 3.2.0 APK</li>
+</ol>
+<p>Once <code>package</code> and <code>integration</code> pass, <code>release-apk</code> creates the GitHub
+   Release and attaches the APK and the SBOM (always; RCs get <code>--prerelease</code>).
+9. <strong>Verify the release</strong> is visible on GitHub Releases. The feed at
+   <code>openwrt-iac.github.io/feed/</code> picks up the new asset on its next
+   <code>publish.yml</code> run (nightly schedule or manual
+   <code>gh workflow run publish.yml --repo openwrt-iac/openwrt-iac.github.io</code>).
+10. <strong>After a 3.x release, once 4.0.0 is out, check that 4.x keeps the Latest
+    mark.</strong>
+    <code>gh release list</code> must show <code>Latest</code> beside the highest 4.x release. The
+    feed and the site serve the release with the mark, so a 3.x release with
+    it puts 3.x on the feed in place of 4.x. If the 3.x release took the
+    mark, run <code>gh release edit &lt;4.x-tag&gt; --latest</code> and then the <code>publish.yml</code>
+    run above.</p>
+<h2 id="reproducible-builds">Reproducible builds</h2>
+<p>A release builds with the snapshot SDK of OpenWrt main of its day, or an
+older one from the SDK cache. OpenWrt rebuilds the snapshot SDK daily
+under the same name and deletes the previous one, so nobody can download
+the SDK of a release again, and the APK bytes cannot be rebuilt from the
+same SDK later. <code>build/openwrt-snapshot-usign.pub</code> pins the key that signs
+the checksums of every snapshot SDK: CI checks that OpenWrt built the SDK,
+not which build it was.</p>
+<p>What a verifier can rebuild is the content of the package. The SBOM of a
+release lists the sha256 of each file that the APK installs:</p>
+<pre><code>git checkout v&lt;version&gt;
+make stage                                # populate files/
+make sbom                                 # build/sbom.spdx.json, without the APK hash
+</code></pre>
+<p>The <code>files</code> of that SBOM must match the <code>files</code> of the SBOM attached to
+the release. Only the creation time and the hash and size of the APK
+differ: for 3.5.0, all 80 files match.</p>
+<h2 id="sbom">SBOM</h2>
+<p><code>make sbom</code> emits SPDX 2.3 JSON at <code>build/sbom.spdx.json</code>. The CI release
+workflow generates the SBOM and attaches it to the GitHub Release
+alongside the APK:</p>
+<pre><code>make sbom APK=$(find build/sdk/bin -name 'uapi-*.apk' | head -1)
+gh release upload v2.0.0 build/sbom.spdx.json --clobber
+</code></pre>
+<p>The SBOM lists every shipped file's sha256, every package dependency
+(<code>uhttpd</code>, <code>uhttpd-mod-ucode</code>, etc.), and the package itself with the
+built APK's verification sha256. Operators using SBOM-aware deployment
+tooling (cosign, syft, etc.) can consume it directly.</p>
+<h2 id="changelog">Changelog</h2>
+<p><code>CHANGELOG.md</code> follows <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>:
+an
+<code>## [Unreleased]</code> section at the top, and one section per release below it. The
+process is the
+one Grafana Mimir uses: each PR writes its own entry, and CI checks that it did.</p>
+<p><strong>Every PR records its change in the same PR.</strong> It adds an entry under <code>##
+[Unreleased]</code>, in the
+heading that fits: <code>Added</code>, <code>Changed</code>, <code>Deprecated</code>, <code>Removed</code>, <code>Fixed</code>,
+<code>Security</code>, or
+<code>Internal</code> for release and build machinery. The entry ends with the PR number in
+parentheses,
+for example <code>(#193)</code>. <code>.github/workflows/changelog.yml</code> runs
+<code>scripts/changelog-has-entry.sh</code>
+and fails the PR when no entry under <code>## [Unreleased]</code> carries its number.</p>
+<p><strong>An entry is needed for every change that someone outside the repo can see:</strong>
+the wire
+surface, the behavior on the router, the package, or the release artifacts (APK,
+SBOM, GitHub
+Release). A PR that changes none of these takes the <code>changelog-not-needed</code> label
+instead. The
+<code>entry</code> job still runs on that PR, reads the label from the API and passes. That
+covers docs,
+tests, CI that changes no artifact, refactors, and release PRs.</p>
+<p><strong>The entry says why, not only what.</strong> It names the defect or the need, what
+changed on the
+wire, and what a client must do, if anything. A breaking change opens with
+<code>BREAKING:</code>. A
+tightening under a carve-out in <code>docs/versioning.md</code> names the carve-out and
+says how loudly it
+fails. This is why entries are not generated from PR titles, as release-please
+does in Grafana
+Loki and Alloy: a title cannot carry that.</p>
+<p><strong>The PR number exists only once the PR does.</strong> Either open the PR and then push
+the entry, or
+predict the number with <code>scripts/next-pr-number.sh</code> before you open it. Issues
+and PRs share one
+counter, so the guess is wrong if an issue opens in between, and the check then
+fails until the
+entry carries the real number.</p>
+<p><strong>At release time,</strong> <code>scripts/changelog-missing.sh &lt;previous-tag&gt; &lt;line&gt;</code>
+lists every PR merged into <code>&lt;line&gt;</code> since that tag that has neither an entry
+nor the label: <code>main</code> for 4.x, <code>v3</code> for 3.x. It must print nothing. Step 3
+above then turns <code>## [Unreleased]</code> into the release section, and
+<code>scripts/release-notes.sh</code> makes that section the GitHub Release body.</p>
+<p><strong>A change carried between <code>main</code> and <code>v3</code></strong> has a PR on each branch, and its
+entry keeps the number of the <code>main</code> PR at its end:
+<code>(#&lt;v3 PR&gt;) (#&lt;main PR&gt;)</code>. When the <code>v3</code> PR merges first, the <code>main</code> number
+joins the entry where the 3.x section is copied into <code>main</code>. The sweep of each
+branch then finds its own PR, and the sweep of <code>main</code> still finds it after the
+copied section replaces the entry in its <code>[Unreleased]</code>.</p>
+<p>Before this process, entries were written at release time from memory. Between
+3.0.0 and the
+first PR the check covered, nine PRs merged and none of them added an entry.</p>
+<h2 id="pre-release-verification-checklist">Pre-release verification checklist</h2>
+<p>Before tagging:</p>
+<ul>
+<li>[ ] Candidate sweep done for this version number (see above), and its
+  outcome noted even if nothing was eligible.</li>
+<li>[ ] For a major: the maintainers of the Terraform provider and uapi-mcp
+  reviewed the migration guide and the spec of <code>main</code>, and what they reported
+  is fixed.</li>
+<li>[ ] <code>VERSION</code> matches the target tag.</li>
+<li>[ ] <code>build/openapi.json</code>'s <code>info.version</code> matches (<code>make openapi-check</code>).</li>
+<li>[ ] <code>scripts/changelog-missing.sh &lt;previous-tag&gt; &lt;line&gt;</code> prints nothing
+  (<code>main</code> for 4.x, <code>v3</code> for 3.x), and <code>## [Unreleased]</code> is renamed to this
+  version.</li>
+<li>[ ] Any version number a doc announced ahead of time now matches reality.
+  <code>docs/deprecations.md</code> carries a target release in its "Deprecated since"
+  column before that release exists, and the roadmap names target versions
+  too. Both go stale the moment a number moves or a scope slips, which is how
+  the commit-confirm plan ended up still naming 2.4.0 after 2.4.0 shipped
+  without it. Grep the docs for the version being cut and for the one before
+  it.</li>
+<li>[ ] <code>make test coverage</code> green.</li>
+<li>[ ] CI green on the branch being tagged, for the exact commit that will be
+  tagged.
+  <code>main</code> for 4.x, <code>v3</code> for 3.x, <code>release/&lt;major&gt;.&lt;minor&gt;.x</code> for a patch on an
+  older major. All three are built on push.</li>
+<li>[ ] <code>.github/release-signers.asc</code> contains your GPG public key block.</li>
+<li>[ ] For 4.x: the netifd floor in <code>build/openwrt/uapi/Makefile</code> is above
+  the netifd of the <code>openwrt-25.12</code> branch of OpenWrt (<code>docs/packaging.md</code>,
+  The netifd floor).</li>
+<li>[ ] <code>gh workflow run ci.yml --ref main</code> green (<code>--ref v3</code> for 3.x) -
+  validates the per-arch SDKs via <code>verify-arch-build</code> without consuming a
+  tag.</li>
+</ul>
+<p>After tagging, before announcing:</p>
+<ul>
+<li>[ ] package and release-apk jobs completed.</li>
+<li>[ ] verify-arch-build matrix completed (all three non-x86 arches green).</li>
+<li>[ ] APK attached to the GitHub Release.</li>
+<li>[ ] <strong>Stable releases only</strong>: trigger <code>gh workflow run publish.yml --repo
+      openwrt-iac/openwrt-iac.github.io</code> (or wait for the nightly schedule) and
+      confirm
+      <code>apk update</code> against <code>openwrt-iac.github.io/feed/...</code> finds the new
+      version. For an RC or a 3.x release after 4.0.0,
+      confirm the opposite instead, that <code>apk policy uapi</code> still offers the
+      release that the feed served before (step 10 above). The aggregator
+      takes only the stable release marked Latest, so an RC or a 3.x release
+      on the feed is the bug.</li>
+<li>[ ] Smoke install on a real router works.</li>
+<li>[ ] SBOM attached.</li>
+</ul>
+<h2 id="rollback">Rollback</h2>
+<p>If a tagged release is broken in the field:</p>
+<ol>
+<li>Identify the breakage; file an issue.</li>
+<li>Mark the GitHub Release as "Pre-release" via
+   <code>gh release edit &lt;tag&gt; --prerelease</code> to demote it in the UI. Then mark the
+   highest good release of the same major Latest, such as
+   <code>gh release edit v4.0.0 --latest</code> when 4.0.1 is broken, also when a 3.x
+   release came after 4.0.1. The aggregator takes the release marked Latest
+   on its next run.</li>
+<li>Ship a <code>vX.Y.(Z+1)</code> patch with the fix. <code>release-apk</code> marks it Latest
+   when it is the highest version, and the next aggregator run then picks it
+   up and signs a fresh <code>packages.adb</code>.</li>
+<li>The broken APK doesn't necessarily get re-served (it's only on
+   GitHub Releases at that point); operators who already installed
+   the broken version aren't auto-downgraded, but <code>apk upgrade uapi</code>
+   resolves to the patched version once the feed updates.</li>
+</ol>
+<h2 id="if-uapi-ever-grows-compiled-code">If uapi ever grows compiled code</h2>
+<p>The current arch-neutrality contract depends on <code>PKGARCH:=all</code> in
+<code>build/openwrt/uapi/Makefile</code> (pure ucode + shell). If a future change
+adds a C component:</p>
+<ol>
+<li>Drop <code>PKGARCH:=all</code> from the package Makefile.</li>
+<li>Convert <code>package</code> from a single job into a matrix over arch (same
+   matrix <code>verify-arch-build</code> uses today), and have <code>release-apk</code> attach
+   every APK.</li>
+<li>The smoke test still only runs on x86_64 (the QEMU image we host); add
+   per-arch QEMU images if real runtime coverage matters.</li>
+<li>Plan for ~4x package runtime.</li>
+</ol>
+<p>This is documented in case the principle is ever revisited; the
+architectural intent is that it should not be.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/release-process.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/release-process.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

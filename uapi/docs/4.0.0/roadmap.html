@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / Roadmap</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="roadmap">Roadmap</h1>
+<p>Things deliberately not yet shipped. Each entry says why and what shape the
+change would take. Update this file when an item moves between sections.</p>
+<h2 id="shipped">Shipped</h2>
+<p>The section of each release in <code>CHANGELOG.md</code> is the full record.</p>
+<ul>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#350---2026-11-21">3.5.0</a>: interrupted writes in diagnostics, request bounds in uci.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#340---2026-11-04">3.4.0</a>: the v4 program announced in the spec and the deprecations log.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#330---2026-11-03">3.3.0</a>: the kernel view of WireGuard peers, bounded body reads.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#320---2026-10-29">3.2.0</a>: reads follow the daemons, and a write they refuse answers 422.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#310---2026-10-11">3.1.0</a>: <code>system/cron_jobs</code> and <code>dhcp/hosts.match_tag</code>.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#300---2026-08-13">3.0.0</a>: the removals that 2.5.0 announced, and the <code>/api/v3</code> mount.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#250---2026-08-09">2.5.0</a>: kernel-apply headers, <code>disabled</code> on network resources.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#200---2026-06-04">2.0.0</a>: the 35-item consolidation behind the v2 major.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/blob/main/CHANGELOG.md#120---2026-06-01">1.2.0</a>: ETags, the schema type check and the per-package locks.</li>
+</ul>
+<h2 id="features-additive-future-minor-bumps-in-4x">Features (additive, future minor bumps in 4.x)</h2>
+<ul>
+<li><strong>Upstream: one unresolvable peer endpoint should not take a tunnel down.</strong>
+  Filed as
+  <a href="https://github.com/openwrt/openwrt/issues/24511">openwrt/openwrt#24511</a>, and
+  fixed on OpenWrt main by ecd9120f04 (2026-11-18). <code>wg syncconf</code> is all or
+  nothing and the proto handler escalates any failure to <code>proto_setup_failed</code>,
+  so a peer whose endpoint hostname does not resolve stopped the interface
+  coming up at all, healthy peers included. Measured: <code>up=false</code>, zero peers,
+  no addresses, netifd retrying and giving up. The ucode handler of main now
+  leaves out the endpoint, preshared key or keepalive line that wg would
+  refuse, and the peer of a key that is not a WireGuard key, so the other peers
+  come up. An allowed IP that wg refuses still takes the tunnel down, and so
+  does an endpoint host of digits and dots that inet_aton does not read, such
+  as <code>10.0.0.256</code>, which the handler gives wg as an address with no lookup. A
+  write refuses such a host. A write to an interface that a peer from another
+  writer keeps down keeps its commit and answers <code>X-Kernel-Status: blocked</code>,
+  with the peer in <code>X-Kernel-Blocked</code>.</li>
+</ul>
+<p>25.12, which 4.x does not support, keeps <code>wireguard.sh</code>, where the half that
+  matters to 3.x remains: the <code>wg set</code> apply protects the <em>write</em>, not the
+  <em>boot</em>. A peer whose endpoint resolves when written and stops resolving later
+  sits in uci, and the next reboot runs it through the proto handler and drops
+  the tunnel. No amount of local code fixes that, because the platform owns the
+  boot path.</p>
+<p>The <strong>peer change detection</strong> half needs nothing from us. It was reported
+  twice, on the devel list in 2023 and as
+  <a href="https://github.com/openwrt/netifd/pull/66">netifd#66</a> in 2026, and neither
+  landed in that form; it is instead solved in master by the ucode proto rewrite
+  (<code>package/network/utils/wireguard-tools/files/wireguard.uc</code>), whose <code>config</code>
+  function loads peers so the framework's change detection covers them. That
+  rewrite also fixed route metrics
+  (<a href="https://github.com/openwrt/openwrt/issues/23199">#23199</a>) but left
+  <code>proto.setup_failed()</code> exactly as it was.</p>
+<p>Neither outcome retires <code>src/lib/wg.uc</code>. Even with both fixed, a netifd-driven
+  apply stays asynchronous, so uapi still could not report whether a write
+  reached the kernel, which is what the transaction contract needs. Retiring the
+  local code would take netifd applying peer deltas synchronously, which is not
+  on anyone's roadmap.</p>
+<ul>
+<li>
+<p><strong>Upstream: uhttpd serves its request queue last-in first-out.</strong> When every
+  <code>max_requests</code> handler slot is taken, uhttpd queues a new request and serves
+  the
+  newest queued one first, so a client that keeps the slots busy keeps the
+  earliest
+  queued request waiting the longest, and it needs no token to do so. uapi's 10
+  s body
+  deadline frees its own slots, but the order of the queue is uhttpd's and no
+  ucode
+  handler can change it. Found while measuring the body reads of
+  <a href="https://github.com/openwrt-iac/uapi/pull/296">#296</a> and
+  <a href="https://github.com/openwrt-iac/uapi/pull/299">#299</a> on uhttpd 2025.10.03. A
+  fix
+  belongs to uhttpd, and this is recorded so the question is not re-opened as
+  uapi work.</p>
+</li>
+<li>
+<p><strong>Upstream: luci-base reads a request body with no deadline.</strong> LuCI's ucode
+  runtime
+  reads a POST body with <code>uhttpd.recv</code> on the same blocking pipe as uapi and
+  sets no
+  deadline (<code>modules/luci-base/ucode/uhttpd.uc</code>, <code>luci.http</code>), so a body that
+  stalls
+  holds one of the shared <code>max_requests</code> slots until the script timeout of
+  uhttpd, the
+  login included. uapi bounds its own bodies
+  (<a href="https://github.com/openwrt-iac/uapi/pull/299">#299</a>). LuCI's requests share
+  the same
+  slots and keep their behavior. A fix belongs to luci-base, and this is
+  recorded so the
+  question is not re-opened as uapi work.</p>
+</li>
+<li>
+<p><strong>Standalone confirm arm, <code>POST /uapi/confirm</code>
+  (<a href="https://github.com/openwrt-iac/uapi/issues/324">#324</a>).</strong> Additive, so a
+  4.x minor can ship it. It waits for a consumer that asks for it.
+  <code>docs/commit-confirm.md</code> holds the design, the authz model and the reasons
+  for the wait.</p>
+</li>
+<li><strong>Webhooks / change notifications.</strong> Push notification to a configured
+  URL after a successful write. Needs reliable retry + dead-letter queue;
+  likely needs a sidecar. Defer until there's a concrete subscriber.</li>
+<li><strong>Server-Sent Events / streaming.</strong> Long-lived connections for log
+  streaming or change feeds. Fundamentally incompatible with the
+  fork-per-request model. Punt.</li>
+<li><strong>Per-field RBAC.</strong> Granular write permissions like "can edit MTU but not
+  IP on <code>network/interfaces</code>". Scope-level is enough today, and this is
+  enterprise creep. Don't add until requested by a real deployment.</li>
+<li><strong>Content-Type negotiation (YAML, msgpack).</strong> Single-content-type
+  (<code>application/json</code>) is correct for IaC. Defer indefinitely.</li>
+<li><strong>CORS.</strong> Admin UI is LuCI; no browser-direct use case for uapi.</li>
+<li><strong>More resources.</strong> Curation completeness rule in <code>docs/adding-a-resource.md</code>:
+  add when a
+  typical real configuration sets options the curated layer doesn't
+  surface.</li>
+</ul>
+<h2 id="install-the-deferred-packages-in-ci">Install the deferred packages in CI</h2>
+<p>Partly done in 2.5.0. lldpd and vnstat2 are installed by <code>install_uapi</code>'s
+bootstrap, about
+560 KiB together, so <code>lldpd/config</code> and <code>vnstat/config</code> are exercised by
+<code>tests/integration/49_daemon_gated_resources_test.sh</code> and included in the
+stock-config
+round-trip. The install sits in the bootstrap rather than inside a test, which
+is what avoids
+the QEMU SLIRP failure that cost hours of CI when it was tried inline.</p>
+<p>Still outside the image, so still unexercised: snmpd, mwan3, sqm, usteer,
+prometheus-node-exporter-lua and the openvpn handler, whose uci storage
+<code>53_interface_proto_scope_test.sh</code> checks without it. unbound is installed by
+<code>40_unbound_uci_ext_test.sh</code>
+but only while that test runs, which is not a guarantee another test can lean
+on.</p>
+<p>The cost of leaving it is measurable rather than theoretical:
+<code>vnstat/interfaces</code> modelled a
+section type vnstat never reads and shipped that way, because a resource for an
+uninstalled
+package is never exercised against real configuration, so a wrong section type
+is
+indistinguishable from a right one.</p>
+<p>Note for whoever picks up the rest: on the standing test box the distfeeds
+needed pointing at
+25.12.5 and the kmods feed at kernel <code>6.12.94-1-a7bc15f4...</code>, or every <code>kmod-*</code>
+dependency
+is unresolvable.</p>
+<h2 id="hardening-next-no-new-wire-surface">Hardening (next, no new wire surface)</h2>
+<ul>
+<li>
+<p><strong>Decide whether the perf bench should gate, and on what.</strong> It measures
+  per-endpoint p99 on every CI run and gates nothing: the comparison in
+  <code>tests/bench/ci_bench.sh</code> runs only against a committed <code>bench/baseline.json</code>,
+  which has never existed, so any size of latency regression has always shipped
+  green. The naive fix is to commit a baseline, and it is probably wrong: a p99
+  recorded on one GitHub runner class says little on another, so a percentage
+  threshold would flake instead of catching anything, and a flaky gate gets
+  ignored and then removed. The options worth weighing are an absolute ceiling
+  loose enough to survive runner variance while still catching an order-of-
+  magnitude regression, or leaving it as measurement and reading the numbers at
+  release time. Deciding needs a few runs' worth of variance data across
+  runners,
+  which nobody has gathered. Until then the tree says measurement, not gate.</p>
+</li>
+<li>
+<p><strong>A request that uhttpd kills after its commit still leaves the write half
+  done.</strong> uhttpd
+  sends <code>SIGKILL</code> to the request process, and to no other, when the client
+  closes the
+  connection before the response and when <code>script_timeout</code> runs out (60 s unless
+  set). A
+  Terraform interrupt or a client-side timeout does the first. No ucode code
+  runs after a
+  <code>SIGKILL</code>. <code>transaction()</code> commits, then reloads, runs the stay-up watch and
+  the kernel
+  apply, and after a failure restores the snapshot and reloads again, all in
+  that process.
+  A kill after the commit leaves uci with the new config, runs no check and no
+  restore, and
+  answers nothing. The reload that the request started runs on, and since the
+  lock fds
+  close on exec the kill also releases the lock, so the next write can commit
+  and reload
+  beside it. <code>multi_transaction()</code> and the crontab apply in <code>crontab.uc</code> have
+  the same
+  shape. The steps after the commit are not short: the reloads, which uapi waits
+  for up to
+  20 s in all, the stay-up watch, which waits up to 2 s and again on a restore,
+  and the kernel
+  apply.
+  The write journal reports such a write in <code>GET /uapi/diagnostics</code> since
+  3.5.0. It does not finish or restore the write: one request may not undo a
+  write that is not its own, because the scopes of the request that started the
+  write are the only authority over what its revert may touch. Nothing inside
+  the request can close the rest, so it needs a design change. The shapes left,
+  none chosen:</p>
+</li>
+<li>The steps after the commit in a process that uhttpd does not kill. That is
+    work that
+    outlives the request, which <code>docs/concurrency.md</code> rules out, and the client
+    still gets
+    no answer.</li>
+<li>
+<p>A change to uhttpd to send <code>SIGTERM</code> and wait before <code>SIGKILL</code>, so that a
+    request can
+    ignore it with ucode's <code>signal()</code> until its recipe ends. That is upstream
+    work, and the
+    wait would bound how long a recipe may take.
+  The details are under Open findings in <code>docs/lock-state-audit.md</code>.</p>
+</li>
+<li>
+<p><strong>The restore after a failed reload leaves a package that another writer
+  committed to during
+  the reload, and the operator repairs it.</strong> LuCI and a shell take no uapi lock,
+  so they can commit
+  to the package while its daemons reload, into the file that the request
+  committed. The restore
+  wrote back the snapshot from before both, so it undid that commit too. It now
+  compares the file
+  with what the request committed, under libuci's flock, leaves a file that
+  differs as it is, and
+  answers <code>reload_failed_unrecovered</code> with the package named in <code>restore_error</code>.
+  The package then
+  keeps the write that the daemon refused beside the other commit. A commit that
+  libuci renames
+  between the comparison and the rename of the restore is still undone, and so
+  is one between the
+  rename of the request's own commit and the read of the file that follows it.
+  Two ways to recover
+  such a package without the operator were not chosen:</p>
+</li>
+<li>Undo only the writes of the request: load the file as it is, set back what
+    the request wrote
+    and commit through libuci. That needs a rule for an option that both wrote,
+    puts a section that
+    a DELETE removed back at the end of the package with a new name when it was
+    anonymous, drops
+    the comments of the file, and gives up the check of its own write that the
+    restore makes,
+    because libuci does not check its write.</li>
+<li>
+<p>Hold libuci's flock from the commit to the end of the restore: libuci's own
+    load and commit in
+    the request would wait on that lock, LuCI would wait for the whole reload,
+    and libuci releases
+    its flock before its rename anyway.</p>
+</li>
+<li>
+<p><strong>Reporting-surface consumption is the provider's.</strong> <code>X-Kernel-Status</code>,
+  <code>management_path</code> and <code>?validate=1</code> are all emitted and documented here, and
+  <code>terraform-provider-uapi</code> consumes none of them. That is the provider's call,
+  not a gap
+  in this repo, and it is recorded here only so the question is not re-opened as
+  uapi
+  work.</p>
+</li>
+<li>
+<p><strong>The idempotent retry of a POST that lost its answer is the provider's.</strong>
+  uhttpd can
+  kill a request after its commit, which leaves the write applied and no answer
+  sent, and
+  the idempotency store replays a 2xx answer to the same key and body for 24 h,
+  so the
+  retry is client work
+  (<a href="https://github.com/openwrt-iac/terraform-provider-uapi/issues/45">terraform-provider-uapi#45</a>).
+  Recorded here only so the question is not re-opened as uapi work.</p>
+</li>
+<li>
+<p><strong><code>unbound/srv.ip_transparent</code> still reads with <code>normalize_bool</code>.</strong>
+  <a href="https://github.com/openwrt-iac/uapi/issues/310">#310</a> moved the other
+  boolean reads to the parser of their daemon. The reader of this option, in
+  <code>unbound-uci-ext</code>, has not been checked yet, so the right helper is not known.
+  See <code>docs/ucode-quirks.md</code>.</p>
+</li>
+</ul>
+<p>The open defects that the lock-state audit found are under Open findings in
+<code>docs/lock-state-audit.md</code>.</p>
+<h2 id="objectives-for-the-next-major">Objectives for the next major</h2>
+<p>The sweep list for v4, tracked in the <a href="https://github.com/openwrt-iac/uapi/milestone/1">v4
+milestone</a>. At v4 planning,
+read it top to bottom: every line must resolve to an issue in the milestone, or
+be explicitly descoped in the release PR with the reason. An issue is closed
+when its work merges into <code>main</code>, the 4.x line since the <code>v4</code> branch merged, and
+that work ships with v4. The mechanisms, the evidence and the open questions
+live in the issues.</p>
+<p><strong>Left the milestone:</strong></p>
+<ul>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/324">Ship the standalone confirm
+  arm</a>: additive, so a 4.x
+  minor can ship it, as <code>POST /uapi/confirm</code> with the scope <code>uapi:confirm:rw</code>.</li>
+</ul>
+<p><strong>Merged, and closed:</strong></p>
+<ul>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/240">Routes <code>table</code> and rules <code>lookup</code> accept table names on
+  write</a>: the request type
+  becomes a union, breaking, and a read still answers the id.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/241"><code>network/interfaces.ip6prefix</code> stops taking a string on
+  write</a>: announced since 3.2.0,
+  the only open deprecation window.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/276">One rule for newlines in curated
+  strings</a>: a default refusal in
+  <code>check_schema_types</code>, with an opt-out for <code>system.notes</code>.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/306"><code>mwan3/interfaces.family</code> is required, or an unset one reads
+  <code>ipv4</code></a>: either way breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/307">A <code>wireless/interfaces</code> section with no <code>mode</code> reads null instead of
+  <code>ap</code></a>: a read today reports an
+  access point that does not exist.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/308">Refuse a write for any stored error the section holds, as LuCI
+  does</a>: the schema check and
+  every rule judge the section that a write leaves, so what the sweep lists
+  blocks the write.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/310">Retire <code>normalize_bool</code>, boolean reads follow the platform's
+  reader</a>: prerequisite is
+  <a href="https://github.com/openwrt-iac/uapi/issues/312">reading libvalidate's accepted set out of
+  ubox</a>, shipped in 3.4.0.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/319">Group the special endpoints under
+  <code>/uapi/...</code></a>: the paths and
+  the scopes disagree today, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/320">Merge <code>dhcp/leases6</code> into
+  <code>dhcp/leases</code></a>: one endpoint
+  less, breaking.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/322">One documented runtime envelope on every
+  resource</a>: every resource
+  answers a <code>runtime</code> that its schema requires, breaking for generated clients.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/323">Prune dead error codes from the
+  enum</a>:
+  <code>unsupported_media_type</code> is the documented-dead one, breaking for generated
+  clients.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/329">Consolidate the <code>x-uapi-*</code> marker
+  namespace</a>: four vendor
+  markers, one of which dies with #241, internal.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/359">WireGuard peers on OpenWrt
+  main</a>: the kernel apply waits
+  for the restart of netifd's ucode handler, and a restart that does not end
+  fails the write.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/360">dnsmasq on OpenWrt main</a>: the
+  test writes <code>dhcpv4 'server'</code>, as the stock config of main does.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/392">A v4 lease without a client id reads duid
+  <code>"*"</code></a>: dnsmasq writes <code>*</code>
+  for a missing client id, which reads null, as for the hostname.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/407">mwan3 <code>loglevel</code> <code>err</code> and <code>warn</code>, and a member <code>metric</code> above
+  256</a>: uapi took them and the
+  daemon did not. A write now refuses them.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/408">A firewall <code>synflood_rate</code> with a unit and a zone without a policy read
+  another value than fw4 uses</a>:
+  reads that change, with a new ETag at the upgrade.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/415">The HTTP token mint takes a scope that the server does not
+  know</a>: it answers 422, as
+  <code>uapi-token create</code> refuses it, announced in 3.5.0.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/311">Widen <code>network/interfaces.disabled</code> to the platform
+  boolean</a>: 4.x needs OpenWrt
+  main or the next release, whose netifd takes <code>disabled 'true'</code> on an
+  interface since <code>e97e36f</code>, and 25.12 stays on 3.5.0.</li>
+<li><a href="https://github.com/openwrt-iac/uapi/issues/466">openvpn becomes a proto of
+  <code>network/interfaces</code></a>: on
+  OpenWrt main the package has no init script, so <code>openvpn/instances</code> goes,
+  breaking.</li>
+<li>The mount moves to <code>/api/v4</code> and the install hook strips every older prefix,
+  as each major moved it before. The v3-to-v4 migration document rides the
+  release.</li>
+</ul>
+<h2 id="out-of-scope-by-design">Out of scope by design</h2>
+<ul>
+<li><strong>Dropping <code>managed</code> and the adopt flow</strong>
+  (<a href="https://github.com/openwrt-iac/uapi/issues/321">#321</a>, withdrawn before v4).
+  libuci names an anonymous section at each load from its ordinal in the package
+  and a hash of its type, so the name moves to another section when an earlier
+  one is deleted. A client that stored such a name and wrote or deleted through
+  it reached another section with a 2xx. <code>adopt</code> is how a client gets a name
+  that holds, and <code>managed</code> is how it knows that it needs one.</li>
+<li><strong>Localization of error <code>message</code> strings.</strong> English-only; codes are
+  stable and translatable client-side.</li>
+<li><strong>Async/parallel ubus.</strong> <code>conn.call()</code> only, by design (see
+  <code>docs/concurrency.md</code>).</li>
+<li><strong>In-memory caches across requests.</strong> Forked children only; the design
+  precludes them. State that must span requests lives in a file or in uci.</li>
+<li><strong>Multi-tenant scoping.</strong> Single admin namespace. Adding multi-tenancy
+  would require a richer auth model than scopes-on-tokens.</li>
+</ul>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/roadmap.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/roadmap.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uapi architecture - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / uapi architecture</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="uapi-architecture">uapi architecture</h1>
+<p>Reader-facing technical overview. The design contract lives in <code>CLAUDE.md</code>;
+this document explains the <em>current shape</em> of the implementation: where
+state lives, how a request is served, what locks are held when, how ETags
+are computed, how rate limits and metrics are stored, what the failure
+modes are.</p>
+<h2 id="process-model">Process model</h2>
+<p><code>uapi</code> is not a daemon. There is no <code>uapi</code> process. There is no <code>uapid</code>,
+no <code>procd</code> service definition, no procmon entry.</p>
+<p>The code runs inside <code>uhttpd</code>'s existing fork-per-request CGI workers via
+<code>uhttpd-mod-ucode</code>. A single <code>list ucode_prefix
+'/api/v4=/usr/share/uapi/main.uc'</code>
+entry in <code>/etc/config/uhttpd</code> is the entire wiring.</p>
+<p>Specifically, uapi shares the default <code>main</code> uhttpd instance with LuCI. Both
+serve configuration use cases; sharing keeps the footprint minimal and lets uapi
+inherit whatever TLS configuration the operator already set up for LuCI (acme
+certs, custom listen addresses, etc.). A dedicated uapi uhttpd instance was
+considered and rejected: it doubles the runtime cost without earning the
+isolation back (an attacker who can reach LuCI can already reach the same box).</p>
+<pre><code>                         uhttpd parent (always running)
+                         ├── compiles main.uc once at startup
+                         ├── module-level state warm in parent VM
+                         │   (RESOURCES, SINGLETONS, RESOURCE_SOURCES,
+                         │    BARE_RESOURCES, BARE_SINGLETONS, VERSION,
+                         │    LOGGING)
+                         │
+        client ─HTTP─►  forks a child per request
+                         │
+                         child
+                         ├── inherits parent VM via copy-on-write
+                         ├── handle_request(env) runs
+                         ├── any mutation is private to this fork
+                         └── exit(0)
+</code></pre>
+<p>Validated in <code>tests/integration/01_concurrency_model_test.sh</code>: 5 concurrent
+requests against a sleeping endpoint observe at least 2 distinct PIDs
+(the assertion's floor; uhttpd caps concurrent CGI children at 3), total wall
+time ≈ 1-2s instead of ≈ 5s.</p>
+<h3 id="what-this-buys-us">What this buys us</h3>
+<ul>
+<li>Zero footprint when idle. No process to drive memory cost.</li>
+<li>Inherits uhttpd's TLS, listener layout, max-connection budget, and the
+  operator's whitelist/blacklist config for free.</li>
+<li>No supervisor (no procd entry to maintain).</li>
+</ul>
+<h3 id="what-it-costs">What it costs</h3>
+<ul>
+<li>No in-memory state across requests. Counters, caches, in-flight maps -
+  none of it survives. The metrics and rate-limit subsystems are
+  file-backed for exactly this reason.</li>
+<li>No timers. A commit-confirmed revert needs one, so its design puts the
+  timer in a separate package. <code>docs/commit-confirm.md</code> has the design and
+  why it is deferred.</li>
+<li>Per-request VM startup cost. uhttpd-mod-ucode amortizes this via the
+  parent's CoW, but the child still calls module top-level once (the
+  copy-on-write avoids reparsing, not re-instantiation).</li>
+</ul>
+<h2 id="lock-layout">Lock layout</h2>
+<p>Two flock files, used in three patterns:</p>
+<pre><code>/var/lock/uapi.lock                   shared by uci transactions,
+                                       exclusive by non-uci writes (apk,
+                                       password, authorized_keys, cron_jobs)
+/var/lock/uapi.pkg.&lt;package&gt;.lock     exclusive per-package; serializes
+                                       writes to the same uci package only
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Global lock</th>
+<th>Per-package lock</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Read (any)</td>
+<td>none</td>
+<td>none</td>
+</tr>
+<tr>
+<td>Token last-used stamp (rides on an authed request, throttled to 60s)</td>
+<td>SH</td>
+<td>EX on <code>uapi</code></td>
+</tr>
+<tr>
+<td>uci write (any one pkg)</td>
+<td>SH</td>
+<td>EX on that one pkg</td>
+</tr>
+<tr>
+<td>uci write that restarts unbound (<code>unbound_srv</code>, <code>unbound_ext</code>), or that can reload it (<code>dhcp</code>, and <code>system</code> but not <code>system/timeservers</code>, while <code>/etc/init.d/unbound</code> exists)</td>
+<td>SH</td>
+<td>EX on that pkg and on <code>unbound</code></td>
+</tr>
+<tr>
+<td>uci write (multi pkg, /uapi/batch)</td>
+<td>SH</td>
+<td>EX on each, sorted lexicographic order</td>
+</tr>
+<tr>
+<td><code>POST /uapi/services/{name}/recover</code></td>
+<td>SH</td>
+<td>EX on each package whose writes reload the service, sorted</td>
+</tr>
+<tr>
+<td>Non-uci write (apk, system/password, system/authorized_keys, system/cron_jobs)</td>
+<td>EX</td>
+<td>none</td>
+</tr>
+</tbody>
+</table>
+<p>The interactions:</p>
+<ul>
+<li>Two writes against different packages: both take SH on the global file
+  (compatible), each takes EX on its own per-package file → run in parallel.</li>
+<li>Two writes against the same package: both take SH on the global,
+  contend on the per-package EX → the second's <code>LOCK_NB</code> attempt fails, so
+  it returns <code>423 locked</code> with <code>Retry-After: 1</code>.</li>
+<li>Two writes that restart unbound, such as one to <code>unbound_srv</code> and one to
+  <code>unbound_ext</code>, contend on the EX of <code>unbound</code> the same way. Otherwise the
+  restart of one would read as a stop to the stay-up check of the other,
+  and a line that unbound refuses in one would fail the other too. A write
+  to <code>dhcp</code>, or to <code>system</code> through the <code>system</code> resource or <code>/raw</code> (not
+  <code>system/timeservers</code>), takes that EX whenever unbound is installed,
+  before it asks procd whether to reload unbound. So of two of these
+  writes at the same moment, or of one of them and a write to unbound, the
+  second answers <code>423</code> even while unbound does not run. Asked before the
+  locks, a write that skipped a stopped unbound took no lock of it, and a
+  write to unbound beside it started unbound on the config from before the
+  commit of the first.</li>
+<li>A non-uci write (apk install / authorized_keys write) takes EX on the
+  global → refused with <code>423 locked</code> while any uci transaction is in flight
+  (any package), and refuses new ones the same way until it is done. Apk's
+  own DB lock is downstream; the global EX ensures uapi never has two apk
+  writers in flight.</li>
+</ul>
+<p>All locks are non-blocking (<code>LOCK_NB</code>); contention surfaces as <code>423
+locked</code> so the client can decide whether to back off and retry. The HTTP
+worker never waits for a uapi lock, but libuci's own flocks on a package
+file block while LuCI or a shell holds them. It can sleep while it holds a
+uapi lock: it waits up to 20 s
+in all for the reloads of a request, the stay-up
+watch of an unbound reload polls for up to 2 s under the transaction's locks,
+the <code>dnsmasq --test</code> check of each instance runs for up to 10 s, and the
+respawn check of a dnsmasq reload waits 1 s, then can stop and start dnsmasq
+within what is left of the 20 s. <code>POST /uapi/services/{name}/recover</code> holds its
+locks across one such stop and start, 10 s at most.
+The restore after a failed reload also waits, for up to 5 s, for libuci's flock
+on the package file. A load holds that flock while it parses the file, and a
+<code>uci commit</code> while it reads the file again, writes its temp file and syncs it.</p>
+<p>Audit and verification: <code>docs/lock-state-audit.md</code> covers every site in
+<code>src/</code> and <code>cli/</code> that takes an fd, a pipe, a lock, a ubus connection or a uci
+cursor, with proof of release on every in-request exit path including <code>die()</code>.
+It also says what runs while each lock is held and what a killed request leaves
+behind. <code>make lint-lock-audit</code> fails when a site is missing from it.</p>
+<h2 id="transaction-recipe">Transaction recipe</h2>
+<p>Every write request follows this sequence. Failure at any step short-circuits
+without uci state change.</p>
+<ol start="0">
+<li><strong>Pre-flight checks.</strong> For each entry in the resource's <code>reload</code> list,
+   confirm <code>/etc/init.d/&lt;svc&gt;</code> exists and the name matches <code>^[A-Za-z0-9_-]+$</code>.
+   Miss → <code>503 init_script_missing</code> with the missing path; no uci write
+   attempted. A service in the resource's <code>reload_if_running</code> list, a daemon
+   that reads the package but that an image can lack or that the operator
+   stopped, such as dnsmasq, odhcpd and unbound for the dhcp writes, is kept
+   when its init script exists. Under the locks of step 1, it joins the reload
+   when a verbose <code>service list</code> shows a <code>config.change</code> trigger for it. That
+   matches a LuCI save, whose commit fires each such trigger that procd holds,
+   whatever the instances of the daemon show. procd holds them from the start of
+   the service to its stop, which removes them, so a write starts again a daemon
+   that crashed too often, and starts dnsmasq when it enables a <code>dnsmasq</code>
+   section while every other one is disabled, as the save does. At boot,
+   unbound.init registers only a trigger on interface events, which starts
+   unbound 3 s after the last of them, so neither starts it earlier. Any config
+   trigger counts, not only one on the package written, because a <code>system</code> write
+   reaches unbound only through ucitrack's <code>affects</code>. Otherwise the daemon is
+   skipped, so it never answers 503, and a reload does not start a daemon that
+   the operator stopped, as the reload of dnsmasq.init and unbound.init would.
+   When the <code>service list</code> call fails, uapi cannot tell, and reloads it. Then
+   confirm <code>/etc/config/&lt;package&gt;</code> exists, because the uci cursor stores nothing
+   in a missing file and reports that only through a null return. Miss → <code>503
+   config_missing</code> with the path. A DELETE checks the file first and answers
+   <code>404 not_found</code> for a missing one, because no section can exist there, and a
+   client reads a 404 on DELETE as already gone. A <code>POST /uapi/batch</code> answers
+   the 503 for a DELETE too, because it commits as one write.</li>
+<li><strong>Acquire flock.</strong> SH on global + EX on the per-package file
+   (non-blocking), and EX on <code>unbound</code> when one of the <code>reload</code> services, or
+   of the <code>reload_if_running</code> services that step 0 kept, restarts unbound, as
+   <code>unbound</code> and <code>unbound-uci-ext</code> do. <code>EWOULDBLOCK</code> →
+   <code>423 locked</code> + <code>Retry-After: 1</code>. Then the <code>service list</code> of step 0 runs
+   for each kept service.</li>
+<li><strong>Unload.</strong> <code>uci_unload(&lt;package&gt;)</code> drops the copy of the package that the
+   preview before the lock loaded into the cursor, which serves every later read
+   from that copy, so a commit by LuCI or a shell in between was invisible to
+   the
+   write.</li>
+<li><strong>Validate.</strong> <code>check_schema_types</code>, the resource's <code>validate(json, conn, id,
+   delta, partial)</code> and <code>validate_new(json, conn)</code> where a resource has one run
+   inside the lock over the section as the write leaves it, so a stored value
+   that breaks a rule fails the write too (<code>docs/adding-a-resource.md</code>). Any
+   field error → <code>422 validation_failed</code> with the full set of field errors (not
+   fail-fast), and uci does not change.</li>
+<li><strong>Stage.</strong> <code>uci_set</code> / <code>uci_create_section</code> / <code>uci_delete</code> mutate the
+   cursor's copy of the package, and <code>bus.uc</code> keeps the writes in order.
+   Nothing is staged outside the request process (see below). A PUT and a
+   PATCH skip a set of the value that uci already holds, a delete of an option
+   that it does not hold, and a default that the read fills in for an option
+   that uci does not hold, such as the <code>enabled '1'</code> that a POST or a LuCI flag
+   leaves out. So one that changes nothing has nothing to commit, and it
+   collects no kernel operations. A PUT of the read still writes what it stores
+   in another form than uci holds, such as a list that uci holds as an option or
+   a number in hex, and the PUT of the read after it changes nothing. A PUT and
+   a PATCH also stage a check that the section still exists, see step 5.
+   The response body is <code>fromUci</code> of the section read back from that copy.
+   So a write answers the body, apart from <code>runtime</code>, and the ETag that a GET
+   then answers, unless another writer commits to the package while the
+   request runs. <code>runtime</code> is read before the reload, and the commit replays
+   the writes over such a commit, which the body does not show.
+   <code>network/wireguard_peers</code> diverges: its <code>runtime</code> comes from <code>wg show</code>, which
+   only a GET runs (<code>read_runtime</code>), so a write answers <code>runtime: {}</code> and reads
+   no kernel state under the lock. Read in <code>fn</code>, it would come from before the
+   kernel apply of step 7, and the write would answer as drift what the apply
+   then changes. A GET in a <code>/uapi/batch</code> that writes answers <code>{}</code> for the same
+   reason, since every sub-request runs before the apply of the batch.</li>
+<li><strong>Snapshot and commit.</strong> <code>uci_export(&lt;package&gt;)</code> captures the package file
+   into an in-memory string, the snapshot that step 8 restores. When the request
+   wrote to the package, <code>uci_commit(&lt;package&gt;)</code> then loads the package file
+   again, replays the writes over it and writes it through libuci, so a commit
+   by
+   LuCI or a shell while the request ran is kept. The snapshot is taken here,
+   and
+   not at the lock, so that it holds such a commit too, and the restore of step
+   8
+   keeps it. Taken at the lock, it put back the file from before such a commit.
+   A commit by another writer between the snapshot and the load of the commit,
+   a few microseconds, is still lost on a restore, as one between that load and
+   libuci's write is lost by every commit. After a commit that wrote, the
+   request reads the file again: that is what it committed, which step 8
+   compares with, since ucode-mod-uci cannot export what libuci wrote. A
+   commit by another writer between libuci's rename and that read, a few
+   microseconds, reads as the request's own and is lost on a restore. A
+   request that staged only the check of a section loads the file and runs
+   the check, and writes nothing.
+   A replay that no longer applies, or a section that another writer deleted
+   since the request read it, → <code>409 conflict</code>, and nothing is written. Without
+   the check, a PUT or a PATCH that changed nothing answered 200 for a section
+   that another writer had deleted. A
+   commit that libuci refuses, as on a full overlay, → <code>500 internal_error</code>.
+   Either way the cursor drops its copy of the package, so nothing later in the
+   request reads the writes that the file does not hold. A request that wrote
+   nothing commits nothing, and skips steps 6 and 7: <code>X-Reload-Status:
+   no_reload</code>, <code>X-Kernel-Status: no_kernel</code>.</li>
+<li><strong>Reload.</strong> <code>/etc/init.d/&lt;svc&gt; reload</code> per <code>reload_services</code>, exit code
+   checked. Done directly (NOT through ubus) because
+   ubus-mediated reload is fire-and-forget on OpenWrt; only <code>wait4</code> on a
+   real child gives back the actual exit bit. One shell runs the scripts in
+   order, in the background, with stdin on <code>/dev/null</code> and the output of each
+   in an unlinked file from <code>fs.mkstemp</code>, which is the only one of these files
+   that the script holds. It stops at the first that fails, and writes the exit
+   code of each to another such file, which uapi reads every 20 ms. uapi
+   writes that file full of spaces first, so that the codes land in bytes that
+   the file already holds on a tmpfs that the output of a script has filled,
+   and a file that it cannot fill, or a shell that cannot start the scripts,
+   fails the write. uapi waits for the reloads of a request, those of the
+   restore
+   included, for 20 s in all, and does not kill a reload that runs longer.
+   Such a reload is no failure: the write keeps its commit, runs no stay-up
+   watch and no <code>dnsmasq --test</code> check, since the reload may not have written
+   the config yet, runs the kernel apply, and answers 2xx with
+   <code>X-Reload-Status: unverified</code>. The reloads after it run when it ends,
+   unless it fails. A reload of the restore still running then answers
+   <code>reload_failed_unrecovered</code>, since uapi cannot say that the daemons run the
+   restored config. Through <code>fs.popen</code>, a script that did not end, or a
+   process that it left running with the pipe open, held the request and its
+   locks until uhttpd killed the request at its 60 s script timeout, with no
+   restore and no answer from uapi. Killing the script at a bound does not
+   help: <code>procd_lock</code> of rc.common keeps the lock of the service in the
+   children of the script, such as fw4, so the reload of the restore waited
+   for them and was killed too. <code>system()</code> with a timeout also blocks SIGCHLD
+   in its child, which a script that runs <code>x &amp; wait</code> never sees, so uapi starts
+   the shell with a <code>system()</code> that waits only for the shell that puts the
+   scripts in the background. 20 s of reloads, the checks and the flock wait
+   of a restore fit in the 60 s, see <code>docs/operations.md</code>. procd starts
+   the daemon with its new config on its own, so the init script exits 0 before
+   the daemon
+   has read that config, and a daemon that refuses it stops later. For the
+   reloads that <code>STAY_UP</code> in <code>src/lib/transaction.uc</code> lists, which are
+   <code>unbound</code>, also when a <code>dhcp</code> or <code>system</code> write reloads it, and
+   <code>unbound-uci-ext</code>, the write then watches the procd
+   instances of the daemon that ran before it. It polls <code>service list</code>
+   every 100 ms for 2 s, and an instance that procd reports as not running
+   counts as a failed reload. An instance that <code>service list</code> does not show
+   is being restarted, and does not count. The restore runs the same check.
+   A reload of <code>dnsmasq</code> by a write that commits <code>dhcp</code> is judged by its
+   config instead, because the
+   <code>reload_service()</code> of dnsmasq.init sends SIGHUP right after procd restarts
+   an instance, and on a slow machine that signal can stop the new process
+   for 5 s with a config that dnsmasq takes. The init script writes the
+   config of each instance before it returns. For each instance that
+   <code>service list</code> shows before or after the reload, the write runs its
+   command with <code>--test</code>, and a refusal counts as a failed reload. That
+   includes an instance that is not running, which procd starts on that
+   config, so a config that dnsmasq refused before the write fails the
+   restore too, as <code>reload_failed_unrecovered</code>. <code>fs.popen</code> has no time
+   bound, so the check runs through <code>system()</code> with a timeout of 10 s, its
+   output in a file from <code>fs.mkstemp</code>. A <code>--test</code> that cannot run, because
+   fork fails or no file can be made, counts as a refusal. One that <code>SIGKILL</code>
+   stopped, the timeout or another, judges nothing: the write keeps its
+   commit and answers <code>X-Reload-Status: unverified</code>. A <code>system</code> write reloads
+   dnsmasq too and runs no <code>--test</code>, so that a config that dnsmasq refused
+   before, or a slow parse, cannot fail or undo it. <code>--test</code> parses the config
+   and the files that it includes, and exits. A config that dnsmasq parses
+   but cannot start with, such as two ports that conflict, a lease file in a
+   missing directory or a port that another daemon holds, still answers 2xx.
+   The restore runs the same check. No write waits for the daemon to start,
+   and each pays one parse of the whole config per instance, which grows with
+   its size, and again on a restore. procd counts each death of an instance
+   that ran less than <code>respawn_threshold</code> (3600 s), those of the SIGHUP
+   included, and a reload keeps the count. At the death that takes it above
+   <code>respawn_retry</code> (5), procd clears the respawn of the instance and starts it
+   again only on the next reload (<code>instance_exit()</code> in <code>service/instance.c</code> of
+   procd), which can kill it in the same way. So after every reload of
+   <code>dnsmasq</code>, by any write, uapi waits 1 s and reads <code>service list</code>. An
+   instance that is not running and has no <code>respawn</code> table is one that procd
+   gave up on. One that waits for its respawn keeps the table, so the usual
+   death of the SIGHUP does not count. The reload starts again an instance
+   that procd gave up on, so procd gave up on such an instance during this
+   reload. The config passed, so the write does not restore: it finishes its
+   own reload by another path, once per request. It runs <code>/etc/init.d/dnsmasq
+   stop</code>, which frees the given-up instance at once, polls <code>service list</code>
+   every 100 ms until procd lists no dnsmasq instance, and runs
+   <code>/etc/init.d/dnsmasq start</code>, which sends no SIGHUP and makes instances that
+   count from zero. Both scripts run through the reload shell above. The three
+   steps take up to 3 s, 2 s and 5 s from what is left of the 20 s, and uapi
+   skips them when less than 10 s are left, so they end within the 20 s. A
+   stop still running after its 3 s gets no start, because a start that comes
+   before the delete of the stop leaves dnsmasq out of procd. The write keeps
+   its commit. It answers <code>X-Reload-Status: ok</code> when every instance that procd
+   gave up on runs or waits for its respawn after the start, <code>unverified</code> when
+   the start was still running after its 5 s, and <code>stopped</code> otherwise, with
+   <code>X-Reload-Stopped</code>, which names each instance as <code>dnsmasq/&lt;instance&gt;</code>, also
+   beside <code>unverified</code>. syslog gets <code>uapi-dnsmasq-recovery</code> with the request
+   id and the outcome. On a restore, a dnsmasq that stays down after the one
+   stop and start of the request fails the restore. <code>GET /uapi/diagnostics</code>
+   lists every instance without its <code>respawn</code> table, of the services that
+   <code>POST /uapi/services/{name}/recover</code> takes, as <code>stopped_instances</code>. See
+   <a href="#service-recovery-uapiservicesnamerecover">Service recovery</a>.</li>
+<li><strong>Kernel apply.</strong> It takes the peer operations that the write collected
+   (see below), and a check of each interface that a write of
+   <code>network/interfaces</code> leaves on proto wireguard, since netifd restarts it.
+   For each of these interfaces that is enabled, it first asks the peer
+   resource which enabled peers, as the write committed them, hold a value
+   for which wg refuses the config of
+   the whole interface: a live error of the peer, an allowed IP that wg cannot
+   parse, or a link-local %zone that names no interface of the router, which
+   it looks up in <code>/sys/class/net</code>. The proto handler gives wg every peer of
+   the interface at once, so one such peer keeps the interface down, and a
+   wait for its restart cannot tell a restart that the write broke from one
+   that was broken before it. So the write keeps its commit, runs no restore,
+   and answers <code>X-Kernel-Status: blocked</code> with <code>X-Kernel-Blocked</code>, which names
+   each such peer. The apply skips the interface with no wait, and netifd sets
+   the peers from uci at its next setup. A write that fixes, disables or
+   deletes the peer finds none and goes on as below. A check sets no peer.</li>
+</ol>
+<p>For each peer operation of an interface that no such peer holds, skip it
+   unless <code>network.interface.&lt;name&gt;</code> reports <code>up</code>, then run the
+   matching <code>wg set</code>. The proto handler restarts a wireguard interface on
+   every peer change, so the check first waits for a setup that is in flight
+   to finish: without the wait the write's own reload would
+   leave the interface mid-cycle, the apply would skip, and netifd would
+   re-apply the peers from uci, which turns a peer that wg refuses into a
+   committed section and a <code>setup_failed</code> interface instead of the 500 below.
+   The waits of an apply end at one deadline 8 s after it starts, whatever the
+   number of interfaces, and those of the reconcile of its restore at another.
+   An interface that reads down with no setup pending twice, half a second
+   apart, skips. A setup that never settles fails a write that sets a peer,
+   with a restore, so the caller gets the 500 for a peer that the platform
+   refuses. A write whose operations on the interface only remove peers, a
+   DELETE or a write that disables them, skips the interface instead and
+   keeps its commit: the next setup reads uci, which no longer holds them, and
+   a restore would give back their access. Since openwrt ecd9120f04, which
+   fixed openwrt/openwrt#24511, the handler leaves out a key, a preshared key,
+   an endpoint or a keepalive that wg would refuse. Three values still keep
+   the interface from settling: an allowed IP that wg refuses, an endpoint
+   host of digits and dots that inet_aton does not read, such as <code>10.0.0.256</code>,
+   which the handler gives wg as an address, and an IPv6 host that musl
+   refuses. A write refuses each of them that it sends. The
+   apply sets a peer as the handler does, without the endpoint of a host that
+   does not resolve, and answers <code>X-Kernel-Status: omitted</code>. Runs only after
+   the reload returned zero, and reports the same way, so a failure
+   here follows the recipe below. The interfaces actually
+   applied are recorded and reported on the response as <code>X-Kernel-Status</code> and
+   <code>X-Kernel-Applied</code> (<code>docs/errors.md</code> § Response headers), because a skip
+   leaves the peer in uci alone and a caller otherwise cannot tell that from a
+   write that reached the kernel.
+8. <strong>On reload, stay-up check or apply non-zero:</strong> <code>uci_import(&lt;package&gt;,
+   snapshot)</code>
+   → reload, then <strong>reconcile</strong> each touched interface
+   against the restored uci. Then <code>500 reload_failed_restored</code> with the
+   captured stderr/exit summary. If the restore itself fails,
+   <code>500 reload_failed_unrecovered</code>. <code>uci_import</code> writes the snapshot to
+   <code>.&lt;package&gt;.uapi-restore</code> beside the file that the package names, the target
+   of a symlink included, reads it back, because ucode reports no error from
+   <code>close()</code>, and renames it over that file. A kill or a full overlay leaves the
+   package whole, and a restore that cannot write or rename the file answers
+   <code>reload_failed_unrecovered</code> with a <code>restore_error</code> that names the file.
+   Before it writes, the restore takes libuci's flock on the package file, which
+   waits for a load or a commit in progress, and gives up after 5 s. That orders
+   nothing after it: libuci releases the flock before its own rename, so a LuCI
+   commit that held the lock, or waited on it with the old file open, can rename
+   its file over the restored one, as one libuci commit can over another.
+   Under that flock, the restore first compares the file with what the
+   request committed. A commit by LuCI or a shell after step 5, while the
+   daemons reload, goes into the file that the request committed, and the
+   snapshot would undo it with the write. So a file that differs stays as
+   that writer left it, with both writes, and the restore runs no reload and
+   no reconcile and answers <code>500 reload_failed_unrecovered</code>, whose
+   <code>restore_error</code> names the package and says that another writer committed
+   to it after the commit of the request. The daemons keep what the failed
+   reload left them. The check has the gap of the flock: a commit that
+   libuci renames between the check and the rename of the restore is still
+   undone, as is one in the window of step 5. A file that uapi could not read
+   for the snapshot or after the commit stays as it is too, with a
+   <code>restore_error</code> that says so.
+   ucode has no <code>fsync</code>, so the rename holds against a kill but not against a
+   power
+   cut on a filesystem that writes data back later than the rename, such as
+   ubifs.
+9. <strong>On success:</strong> <code>200</code> with the refreshed resource.</p>
+<h3 id="changes-that-another-writer-staged">Changes that another writer staged</h3>
+<p>A read reports what the package file holds, and a write commits only its own
+changes. A shell stages with <code>uci set</code> in <code>/tmp/.uci</code>, and LuCI stages in a
+directory per session, <code>/var/run/rpcd/uci-&lt;session&gt;</code>. libuci overlays onto a
+package that it loads by name the delta file of that name in each directory of
+its search path, and <code>/tmp/.uci</code> is always in that path: ucode's <code>cursor()</code> adds
+a delta directory but cannot remove that one. rpcd clears the list itself, which
+ucode cannot. So <code>bus.uc</code> loads each package by its path, which reads the file
+alone. A uapi write then neither commits nor deletes what a shell staged, and a
+later <code>uci commit</code> in the shell replays it over what uapi committed.</p>
+<p>This also differs from libuci in one place. A load by name reads
+<code>/var/run/uci/&lt;package&gt;</code>, libuci's override directory, in place of
+<code>/etc/config/&lt;package&gt;</code> when that file exists, and a commit by name writes
+there.
+uapi reads, writes and restores <code>/etc/config/&lt;package&gt;</code> only. Among the package
+files of the OpenWrt feeds, only procd's <code>reload_config</code> reads <code>/var/run/uci</code>,
+and nothing writes it. A package that does not load by its path fails the call
+rather than fall back to a load by name: a read answers null and a write fails.
+That includes a name that libuci does not load by name, one that starts with a
+dot or holds a slash, so the temp files of libuci and of the restore are no
+packages.</p>
+<p>libuci commits a package loaded by path by writing the copy that the cursor
+holds, without reading the file again. The commit of step 5 therefore reloads
+the
+file and replays the request's writes, which keeps a commit by another writer
+that landed while the request ran, as libuci's own replay of a delta does. A
+replay that no longer applies, because another writer deleted a section that the
+request wrote into, or that a PUT or a PATCH addressed without writing to it,
+fails the commit, and the request answers <code>409 conflict</code> with
+a message that names the package. A package that the request did not write is
+not
+committed, as libuci skips a commit with no changes, so its comments stay, and
+it
+gets no reload and no restore.
+<code>uci_revert</code> and <code>uci_unload</code> drop the copy and the writes, which is the whole
+of what the request staged.</p>
+<h3 id="why-step-7-exists-and-why-it-shells-out-to-wg">Why step 7 exists, and why it shells out to <code>wg</code></h3>
+<p>The proto handler of wireguard reads the peers of an interface from their own
+<code>wireguard_&lt;iface&gt;</code> sections, with the config of the interface, so a reload
+restarts the interface on every peer change and gives wg every peer at once.
+wg refuses that whole config for one value that it cannot read, so one bad peer
+keeps the interface down, and the reload reports nothing about it: the write
+would answer <code>200</code> over a committed section and an interface in
+<code>setup_failed</code>. The wireguard handler is the only proto handler that reads its
+own uci sections, so this affects exactly one resource.</p>
+<p><strong>Why not ask netifd to re-apply.</strong>
+<code>ubus call network.interface.&lt;i&gt; renew</code> returns in 0 ms, so a failed apply is
+undetectable, and on failure the proto handler calls <code>setup_failed</code>, which
+takes the interface <strong>down</strong>: one bad peer drops a working tunnel and its
+healthy peers. A <code>down</code>+<code>up</code> restart behaves identically and additionally
+interrupts a healthy tunnel on every peer edit. Every netifd-mediated path
+applies the whole interface config as one unit, so one bad peer takes the
+innocent ones with it.</p>
+<p><code>wg set</code> is the only per-peer path: it is atomic, so a bad endpoint fails that
+one command and changes nothing, it reports a real exit code, and it leaves the
+rest of the tunnel running. WireGuard exposes no ubus service for peers
+(<code>wireguard</code> offers only <code>status</code>/<code>genkey</code>/<code>genpsk</code>/<code>pubkey</code>), which is why
+netifd itself shells out to <code>wg syncconf</code> and LuCI's own backend shells out to
+<code>wg</code>. Running <code>wg</code> is therefore not a way around the platform's abstraction for
+peers, it is the platform's abstraction for peers. uci remains the only config
+writer, the kernel state is derived from committed uci rather than from the
+request, and nothing new runs in the background.</p>
+<p><code>src/lib/wg.uc</code> makes every value safe for the shell itself, on the value as
+uci stores it, because the restore after a failed write reads the peers
+straight from uci, where a value never passed <code>validate()</code>. Every <code>wg</code> and
+<code>ip</code> command is an argument list, and <code>run()</code> quotes each argument with
+<code>shellquote</code>, so no caller can forget one. wg.uc also checks the values before
+it runs a command: <code>route_prefix</code> keeps an address or a CIDR and drops
+anything else, and the interface and table names must match
+<code>^[A-Za-z0-9_-]+$</code>. The checks alone were not enough: a prefix such as
+<code>::/0;id&gt;x;</code> passed <code>route_prefix</code>, because the IPv6 prefix length was read
+with <code>int()</code>, and <code>ip route</code> took it unquoted. A preshared key is passed as a
+<code>0600</code> file on tmpfs, never as an argument, so it never appears in <code>ps</code>.</p>
+<p><code>route_allowed_ips</code> asks for a route per allowed IP, which netifd installs from
+the proto handler, so the apply installs them too: without that the peer is in
+the kernel with no path to it and the flag only half works. They are spelled to
+match netifd exactly (<code>proto static</code>, <code>scope link</code> on v4) and go into <code>ip4table</code>
+/ <code>ip6table</code> when the interface sets one, since netifd puts them there rather
+than in main. A route is the prefix as netifd installs it: the length as
+netifd reads it, and the address masked to that length.
+The handler routes each entry as uci holds it, past a <code>#</code> and a comma that wg
+reads, so a write takes the entries of the section as it stages it: a PATCH
+that leaves <code>allowed_ips</code> as it is keeps an option whose routes can differ from
+the allowed IPs of the read. Routes are compared in that one spelling, so a
+respelled prefix, or the spelling that the kernel prints, is the same route. A
+prefix is only withdrawn when no remaining peer and no <code>config route</code> section
+still wants it, because two peers can carry overlapping <code>allowed_ips</code>. The
+kernel is never scanned for strays on the request path, only on the reconcile
+that follows a rollback, so a route uapi did not install is not at risk.</p>
+<p>The proto handler, <code>/lib/netifd/proto/wireguard.uc</code> of wireguard-tools, gives wg
+each value as uci holds it, and expands no escape. It takes a list of allowed
+IPs as its entries and an option as its words, and it routes each of them. A
+route takes the address before the first <code>/</code> and the length that ucode's <code>int()</code>
+reads after it. The handler leaves out a peer without a key, with its routes,
+and takes <code>disabled</code> and <code>route_allowed_ips</code> as on only when they hold <code>1</code>.
+Since openwrt ecd9120f04 it also checks a peer value against the grammar of wg,
+as uci holds it, and leaves out what wg would refuse: the peer, with its routes,
+for a key that is not a WireGuard key, and the line for a preshared key, an
+endpoint or a keepalive. It gives wg an endpoint host of digits and dots as it
+stands, so wg still refuses the whole config for one that inet_aton does not
+read, such as <code>10.0.0.256</code>. An endpoint port is 1 to 65535 in digits or the
+first field of a <code>/udp</code> line of <code>/etc/services</code>, and an empty one leaves the
+endpoint out. A peer with a host and no port gets port 51820. The read, the
+kernel apply, the routes and the reconcile take these rules from <code>wg.uc</code>. So a
+GET reports an entry that wg refuses as that one entry.</p>
+<p>One consequence to know: netifd reports the routes it installs in
+<code>network.interface.&lt;name&gt; status</code>, and routes installed here are not in that
+list until the next <code>ifup</code>. The kernel is correct; netifd's bookkeeping lags.</p>
+<p>A resource opts in with a <code>kernel_ops(kind, opts, sec_type, existing, staged)</code>
+hook returning the operations to apply, where <code>staged</code> is the section as the
+write leaves it in uci. <code>network/interfaces</code> returns a check of the interface,
+which sets no peer, when the write leaves it on proto wireguard. The
+hook of <code>network/wireguard_peers</code> reads the uci options rather than the
+resource view because the view masks <code>preshared_key</code>, and the parent interface
+off the section type because it is not stored as an option, so a <code>DELETE</code> can
+only learn it from the section it is about to remove. A rotated public key emits
+a remove for the old key before the set, or the kernel would keep the previous
+peer and its access. A disabled peer is removed, matching what netifd omits when
+it builds the config. A remove takes the stored <code>public_key</code> as the handler
+gives it to wg, and the kernel holds no peer under a value that is not a
+WireGuard key. The kernel holds one peer per key, so a remove then sets again
+each other enabled section of the interface that holds the key, in uci order,
+as ifup does. A set, in a write or in the reconcile after a failed write, skips
+a peer whose stored key is not a WireGuard key, as the handler does. The
+handler runs a peer whose stored <code>preshared_key</code> is not one without a
+preshared key, so the set gives wg <code>/dev/null</code> for it, as the restart of the
+handler left it.</p>
+<p>An interface that is down, or that netifd does not know, is skipped: there is no
+kernel state to sync and <code>ifup</code> reads the peers from uci anyway. That is also
+what keeps a peer orphaned by deleting its parent interface deletable.</p>
+<h2 id="multi-package-transactions-uapibatch">Multi-package transactions (<code>/uapi/batch</code>)</h2>
+<p><code>POST /uapi/batch</code> composes N sub-requests under one combined snapshot/restore:</p>
+<ol>
+<li>Pre-resolve every sub-request's target (path → package + reload services),
+   and check its scope, before the pre-flight checks: their 503 would tell a
+   token
+   whether a package that it has no scope for is installed. An operation out of
+   scope aborts the batch with its 403 before anything runs.</li>
+<li><strong>Only WRITE sub-requests contribute to the lock/reload set.</strong> Pure-read
+   batches skip lock+snapshot+commit+reload entirely.</li>
+<li>Acquire global SH + per-package EX in sorted package order
+   (deadlock-free), <code>unbound</code> included as in step 1 of the single-package
+   recipe, then ask procd which <code>reload_if_running</code> services to reload.</li>
+<li><code>uci_unload()</code> each package, as in step 2 of the single-package recipe. Each
+   commit of step 7 takes the snapshot of its package right before it, as in
+   step 5.</li>
+<li>Run each sub-request in order via <code>BARE_RESOURCES</code>/<code>BARE_SINGLETONS</code> -
+   handlers that skip their own per-package flock + snapshot + commit + reload
+   (since the outer multi_transaction has those covered).</li>
+<li>First sub-request status ≥ 400 → abort: <code>uci_revert()</code> each package,
+   return <code>{ code: "batch_partial_failure", aborted_at_index, error: ...,
+   reverted: true }</code>
+   with the failing sub's status.</li>
+<li>All sub-requests 2xx → <code>uci_commit()</code> each package, run the union of the
+   reload services of the packages that the batch committed, then the collected
+   kernel operations. A PUT or a PATCH that changes nothing writes nothing, as
+   in
+   step 4 of the single-package recipe, and a batch that committed nothing runs
+   neither. Same failure
+   recipe as the single-package transaction, and a commit that fails part way
+   counts as a failed reload. Either way only the packages that the batch
+   committed are restored: the snapshot of another one would undo what LuCI or
+   a shell committed to it since, such as the delete that made the replay of the
+   batch fail. Of those, a package that another writer committed to after the
+   batch did stays as in step 8, and the batch answers
+   <code>reload_failed_unrecovered</code> naming it. The restore reloads and checks the
+   daemons of the packages that it wrote back only, and reconciles the kernel
+   only when it wrote <code>network</code> back, so a package that it left is not
+   reloaded on the config that just failed. A restore that wrote no file back
+   runs no reload. Each other package is reverted before that, so that the
+   cursor
+   holds no write that uci did not store, and a reconcile reads <code>network</code> from
+   the file. A commit that fails stops there, with no reload and no reconcile:
+   both come after every commit, so neither ran, and the restore puts a package
+   that the batch committed before the failure back before uapi reloads it. A
+   replay that no longer applies then answers <code>409 conflict</code>,
+   and a commit that libuci refuses answers <code>500 reload_failed_restored</code>.
+   Sub-requests accumulate into
+   one ordered operation list shared through their sub-context, so a batch
+   touching the same peer twice ends on its last state, and the restore
+   reconciles rather than replaying, since a batch can apply several peers
+   before failing on a later one.</li>
+</ol>
+<h2 id="service-recovery-uapiservicesnamerecover">Service recovery (<code>/uapi/services/{name}/recover</code>)</h2>
+<p>The write path stops and starts dnsmasq once when procd gave up on it after the
+reload (step 6). A client that only speaks HTTP has no other way to do it after
+<code>X-Reload-Status: stopped</code>, and a write that changes nothing runs no init script
+by design, so that a plan with no change has no side effect. <code>POST
+/uapi/services/{name}/recover</code> runs the same steps on request, through the same
+<code>recover()</code> of <code>src/lib/transaction.uc</code>:</p>
+<ol>
+<li>Look up <code>{name}</code> in <code>RECOVERABLE</code>: the services that uapi reloads and whose
+   init script sets <code>procd_set_param respawn</code> on every instance that it starts.
+   <code>network</code>, <code>uhttpd</code> and <code>dropbear</code> qualify, and
+   are left out, because the stop acts on the whole service. A stop of
+   <code>network</code> or <code>uhttpd</code> cuts off the request, and a stop of <code>dropbear</code> stops
+   the instance that serves the management SSH session, which a start that
+   fails leaves down. Another name answers 404.</li>
+<li>Check the scope: <code>uapi:services:rw</code>, or <code>rw</code> on a domain of a resource whose
+   <code>reload</code> or <code>reload_if_running</code> lists the service. <code>recover_targets()</code>
+   derives the domains and the packages from the resource modules, so a new
+   resource that reloads a service extends both.</li>
+<li>Take SH on the global and EX on each of those packages, in sorted order, as
+   a write of them does. A write that reloads the service between the stop and
+   the start would start it while procd still holds the instances of the stop.
+   Contention answers 423.</li>
+<li>Read <code>service list</code> for the service. An instance that is not running and
+   has no <code>respawn</code> table is one that procd gave up on. With none, stop and
+   start nothing and answer 200 with an empty <code>recovered</code>, so a retry, a
+   service that runs and one that the operator stopped stay as they are.</li>
+<li>Otherwise run <code>stop</code>, wait until procd lists no instance, and run <code>start</code>,
+   with the bounds of step 6, taken from <code>reload_budget_s</code>. The stop and the
+   start act on the whole service, so its other instances restart too.</li>
+<li>Read <code>service list</code> again. 200 when every instance of step 4 runs, with
+   <code>recovered</code> naming them. Otherwise 500 <code>recover_failed</code>, with <code>service</code>,
+   <code>stopped</code> and the reason. After a start that ran past its 5 s, the instances
+   are read again rather than judged unknown.</li>
+</ol>
+<p><code>service list</code> cannot tell an instance that procd gave up on from one that has
+no respawn and ended: <code>instance_exit()</code> clears <code>respawn</code> when it gives up and
+sets <code>halt</code>, and <code>instance_dump()</code> writes the <code>respawn</code> table only while
+<code>respawn</code> is set, and never writes <code>halt</code> (<code>service/instance.c</code> of procd
+58eb263). So <code>stopped_instances</code> lists only the services of <code>RECOVERABLE</code>, whose
+instances all have respawn, and a one-shot instance of another service that
+ended is not reported.</p>
+<h2 id="schema-layer">Schema layer</h2>
+<p>Every resource module exports <code>schema_properties</code>. <code>handler.check_schema_types</code>
+walks it on every write to enforce:</p>
+<ul>
+<li><code>type</code> (<code>string</code> / <code>integer</code> / <code>boolean</code> / <code>array</code> / <code>object</code> / <code>null</code>)</li>
+<li><code>enum</code></li>
+<li><code>minimum</code> / <code>maximum</code></li>
+<li><code>pattern</code></li>
+<li><code>items</code> (array element schema, with index-bearing field paths like
+  <code>tags[1]</code>)</li>
+<li><code>properties</code> (nested object recursion)</li>
+</ul>
+<p>A PATCH schema-checks the section that it leaves, as a PUT does: the read of
+the stored section with the request merged in, for a merge PATCH and a JSON
+Patch alike. That is the read that the sweep checks, so a stored value that
+breaks a type, an enum, a bound, a pattern or the newline rule fails the write
+as it fails the sweep, whichever fields the request names. The schema declares
+what the platform takes, which a read can give, so a value that LuCI or the
+daemon takes is no error. A keyword under <code>x-uapi-write</code> can narrow what a
+write may send: the handler checks the fields that the request names against
+those keywords too, and a stored value past them blocks nothing. A field that
+the request sends back as the read gives it changes nothing, so those keywords
+do not judge it, and a PUT of the read passes. A PUT reads the stored section
+for that comparison only when a keyword refuses a value. Where the read bound
+and the request bound refuse a sent value with one code, the error gives the
+message of the request bound. The <code>id</code> of a
+stored section is left out, since LuCI names sections that the id pattern of a
+create refuses, such as <code>4g</code>. The write-only secrets that the handler carries
+from uci are left out, because the read masks them. The full merged body,
+secrets included, goes through
+<code>resource.validate()</code> and <code>validate_new()</code>, next to the fields that the request
+names, for a rule about the request rather than the section.
+<code>docs/adding-a-resource.md</code> says when to use which.</p>
+<h3 id="unmodeled-uci-options-put-replaces-patch-preserves">Unmodeled uci options: PUT replaces, PATCH preserves</h3>
+<p>A resource module curates a subset of its uci section's options; <code>toUci</code> emits
+only those. The write path treats options outside that modeled set
+differently per verb:</p>
+<ul>
+<li><strong>PUT (replace)</strong> normalizes the section to the modeled set. <code>diff_apply</code>
+  iterates the raw existing section and deletes every option not re-emitted by
+  <code>toUci</code>, including ones the resource does not model, and sets each option of
+  <code>toUci</code> that uci does not hold as emitted, apart from a default that the read
+  filled in. PUT means "this body is the whole resource," so uapi owns the
+  section, apart from one case: an option that the PUT does not set is not
+  replayed over a commit by LuCI or a shell during the request, so such a commit
+  keeps its value there, as under a PATCH. Before 3.3.0 a PUT replayed every
+  option and its values won.</li>
+<li><strong>PATCH (partial update)</strong> preserves unmodeled options. <code>diff_apply_patch</code>
+  computes the modeled footprint as <code>toUci(fromUci(existing))</code>, with the
+  write-only secrets that the read masks put back, and only deletes within it
+  (a modeled field the patch cleared, or one that <code>toUci</code> drops, as
+  <code>network/interfaces</code> drops <code>private_key</code> on a switch away from wireguard, the
+  way a PUT does). Raw uci options outside the
+  footprint (which <code>toUci</code> cannot emit) are never enumerated, so a PATCH that
+  touches one field leaves a hand-set or stock option like firewall <code>icmp_type</code>
+  / unbound <code>dns64_prefix</code> untouched. This matches RFC 7396 merge-patch and
+  avoids the silent data loss a naive delete-everything-absent would cause.</li>
+</ul>
+<p>A consequence: the GET-then-PATCH-self round trip is lossless even for options
+uapi does not model, but GET-then-PUT-self is not (PUT discards them). Tooling
+that wants to preserve unmodeled state must use PATCH.</p>
+<p>Field errors are deduped by <code>(field, code)</code>. Schema errors win over
+validator errors for the same (field, code) tuple. A <code>validate_new()</code> error is
+dropped only when one of them has its (field, code): each of its rules on a
+field is its own error, so that one cannot hide another. The newline refusal of
+the schema check gives way to a <code>validate_new()</code> error with its code on its
+field, or on the list that holds it (<code>nasid[1]</code> gives way to <code>nasid</code>), which
+says why the daemon cares and carries <code>live</code>. The request schema check comes
+last, so a rule that refuses the same value names it. The 422 body carries the
+full set, so a client fixes everything in one round trip.</p>
+<h2 id="etag-derivation">ETag derivation</h2>
+<p>ETag = <code>sha256(canonical_json(body_without_runtime))</code>, truncated to 12 hex
+chars.</p>
+<p><code>body_without_runtime</code> strips the resource's <code>runtime</code> block before
+hashing. Runtime fields are live ubus/file state (uptime, signal, lease
+count) that drifts second-to-second on unchanged config; including them
+would make ETags non-deterministic and trip spurious 412s.</p>
+<p>ETag is per-resource: a function of <em>this</em> section's content only. Sibling
+sections in the same uci package do not influence each other's ETags, so
+<code>If-Match</code> fires only when the resource the client is updating has
+actually changed. (Cross-reference invariants like "rule's src_zone must
+exist" are enforced at <code>resource.validate()</code> time on every write, not via
+ETag mixing.)</p>
+<p>Two GETs of the same unchanged section always return the same ETag.</p>
+<p>Multi-resource collection endpoints (<code>GET /firewall/rules</code> without an id) do not
+currently carry an ETag. <code>If-Match</code> and <code>If-None-Match</code> only fire on
+resource-level endpoints; collections operate last-write-wins.</p>
+<h3 id="conditional-get">Conditional GET</h3>
+<p><code>If-None-Match: "&lt;etag&gt;"</code> (or <code>?if_none_match=</code>) on a GET: when the
+response ETag matches, return <code>304 Not Modified</code> with no body and the ETag
+header echoed. Cheaper for polling clients (Terraform refresh, dashboards).</p>
+<h3 id="if-match-writes-precondition_check">If-Match writes (precondition_check)</h3>
+<p>PUT/PATCH/DELETE with <code>If-Match: "&lt;etag&gt;"</code> (or <code>?if_match=</code>): when the
+current ETag doesn't match, return <code>412 precondition_failed</code> BEFORE any uci
+write. <code>If-Match: *</code> matches any existing resource. Absent header preserves
+last-write-wins (opt-in concurrency).</p>
+<p>uhttpd-mod-ucode sets an <code>HTTP_*</code> variable only for a fixed list of headers,
+and <code>If-Match</code>, <code>If-None-Match</code>, <code>X-Request-Id</code> and <code>Idempotency-Key</code> are not
+on it. It also gives every request header in <code>env.headers</code>, with its name in
+lower case, and <code>errors.request_context</code> reads the four from there. Each one
+has a query form for a client that cannot set a header: <code>?if_match=</code>,
+<code>?if_none_match=</code>, <code>?request_id=</code> and <code>?idempotency_key=</code>. A header that is
+not empty wins over its query form, and an <code>X-Request-Id</code> header only when it
+matches <code>^[A-Za-z0-9_-]{8,128}$</code>. uhttpd gives an empty header as <code>""</code>, so
+without that rule an empty <code>If-Match:</code> would turn off the precondition of
+<code>?if_match=</code>.</p>
+<h2 id="rate-limit-token-bucket">Rate limit token bucket</h2>
+<p>Per-token bucket, file-backed at <code>/var/run/uapi-ratelimit/&lt;token-id&gt;.txt</code>
+containing a float and an integer: <code>&lt;tokens_remaining&gt; &lt;last_refill_epoch_ms&gt;</code>.
+A token name holds up to 63 characters over HTTP and any number with
+<code>uapi-token</code>, and a file name holds 255 bytes, so a name longer than 63
+characters is replaced by its sha256 in the file name
+(<code>state_dir.token_file</code>). The last-used sentinel is named the same way.</p>
+<p>On each authed request:</p>
+<pre><code>elapsed_ms = now_ms - last_refill
+refilled = min(burst, tokens + elapsed_ms * rate / 1000)
+if refilled &gt;= 1: allow, tokens = refilled - 1
+else:             deny, retry_after = floor((1 - refilled) * 1000 / rate) + 1
+write {tokens, last_refill = now_ms} atomically (tmpfile + rename)
+</code></pre>
+<p>Default rate 100/s, burst 200. Configurable via <code>config ratelimit { option
+rate '...'; option burst '...' }</code> in <code>/etc/config/uapi</code>. Atomic-write
+(tmpfile + rename) avoids flock contention on the hot path; the worst-case
+race is one request's worth of drift across concurrent forks, bounded by
+the burst size.</p>
+<p>Worked example: default config, a client sends 250 req/s sustained against
+one token. Burst absorbs the first 200; the next 50 spaced over 1s exhaust
+the bucket at 100/s. Steady-state: 100/s through, 150/s rate-limited → 429.</p>
+<h2 id="metrics">Metrics</h2>
+<p>File-backed under <code>/var/run/uapi-metrics/</code>. One file per (series, label-set)
+combination:</p>
+<pre><code>/var/run/uapi-metrics/
+  uapi_requests_total/
+    method=GET/path=%2Ffirewall%2Frules/status=200/token_id=tf_prod.txt   &quot;1247\n&quot;
+    method=POST/path=%2Ffirewall%2Frules/status=422/token_id=tf_prod.txt  &quot;13\n&quot;
+  uapi_request_duration_seconds_bucket/
+    le=0.01/method=GET/path=%2Ffirewall%2Frules.txt
+    ...
+  uapi_rate_limit_drops_total/
+    token_id=ci_bot.txt
+</code></pre>
+<p>Path segments (<code>/</code> in label values) are percent-encoded as <code>%2F</code> to keep
+filenames safe; decoded back when emitting. Increments are read-modify-write
+with atomic rename; concurrent forks may lose increments under heavy
+contention - acceptable for operational metrics, not for billing.</p>
+<p>A token mint and a token revoke, over HTTP and with <code>uapi-token</code>, run
+<code>token_store.reap_state</code> under the lock of the <code>uapi</code> package. A mint, over
+HTTP and with <code>uapi-token create</code>, runs it before its commit, so that a
+request that uhttpd kills during the reap cannot lose the bearer of a token
+that it committed. A revoke runs it after its commit. The bucket and the
+last-used sentinel of each token that no longer authenticates are
+unlinked, and each of its <code>uapi_requests_total</code> and
+<code>uapi_rate_limit_drops_total</code> files is added to the file with the same
+other labels and <code>token_id=-retired</code>, then unlinked once the add is on
+disk. A token that revokes itself records its revoke after the fold, and a
+request of a token in flight at its revoke can write its bucket, sentinel
+or series after the reap, so those wait for the next mint or revoke.
+<code>docs/operations.md</code> § Metrics says what a scrape sees.</p>
+<p>A counter is written to a temp file, which is renamed over it only when
+its size on disk is the size of the line, and a counter file that holds no
+count is left out of a scrape and starts again at its next increment.</p>
+<p><code>GET /uapi/metrics</code> walks the tree, decodes the labels, emits Prometheus 0.0.4
+text. Path templates are normalized (<code>/firewall/rules/:id</code> not
+<code>/firewall/rules/r_01HX...</code>) to keep cardinality bounded as clients
+create/destroy resources. A path that no route serves is recorded as
+<code>path="unmatched"</code>, and a <code>/raw</code> path keeps its package only when
+<code>/etc/config</code> holds it (<code>metrics.path_label</code>).</p>
+<h2 id="idempotency-cache">Idempotency cache</h2>
+<p><code>POST</code> requests carrying <code>Idempotency-Key</code> (header or <code>?idempotency_key=</code>)
+are deduplicated for 24 h:</p>
+<pre><code>key = sha256(token_name || &quot;|&quot; || key)
+file: /var/run/uapi-idempotency/&lt;key&gt;.json
+contents: {
+    fingerprint: sha256(token || &quot;|&quot; || key || &quot;|&quot; || body_text),
+    status, headers, body
+}
+</code></pre>
+<p>On second arrival:
+- Same fingerprint → replay (<code>Idempotent-Replayed: true</code> marker header).
+- Different fingerprint → <code>409 idempotency_key_conflict</code>.
+- Past TTL → cache miss; the new request runs and re-populates.</p>
+<p>A key that does not match <code>^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$</code> answers
+<code>400 bad_request</code>, and the request does not run.</p>
+<p>Cache hits skip the entire handler stack except auth and the rate limiter -
+the resource handler never runs. A client retrying a network-blipped POST
+gets the original response back, never a duplicate resource.</p>
+<p>An entry can carry a secret, so it is written 0600 into a private
+directory, see <a href="#where-state-lives">Where state lives</a>. A store writes its
+entry under a temp name of its own request process before the rename, so
+two stores of one key at the same moment each write a whole entry. A
+package install or upgrade removes the directory, so no entry of an older
+version stays. At most once an hour, a store removes the entries
+older than the TTL, so the directory holds the writes of about one TTL. A
+<code>POST /uapi/batch</code> that only reads stores no entry: replaying a read gives
+nothing that running it again does not give.</p>
+<h2 id="audit-and-request_id">Audit and request_id</h2>
+<p>Every response carries <code>X-Request-Id</code> (a ULID by default; client-supplied
+via <code>X-Request-Id</code> header or <code>?request_id=</code> query param, validated against
+<code>^[A-Za-z0-9_-]{8,128}$</code>).</p>
+<p>Each successful write, each 401 and 403, and each 5xx logs one syslog line
+that carries the <code>request_id</code>, so it ties a response to its line. A <code>POST
+/uapi/batch</code> logs one line for the whole request. <code>docs/operations.md</code> § Log
+categories and § Log line format have the categories and the format.</p>
+<h2 id="where-state-lives">Where state lives</h2>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Location</th>
+<th>Lifetime</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Tokens (salted hash + meta)</td>
+<td><code>/etc/config/uapi</code></td>
+<td>Indefinite</td>
+</tr>
+<tr>
+<td>uci configuration</td>
+<td><code>/etc/config/&lt;package&gt;</code></td>
+<td>Indefinite</td>
+</tr>
+<tr>
+<td>Authorized SSH keys</td>
+<td><code>/etc/dropbear/authorized_keys</code></td>
+<td>Indefinite</td>
+</tr>
+<tr>
+<td>Root crontab</td>
+<td><code>/etc/crontabs/root</code></td>
+<td>Indefinite</td>
+</tr>
+<tr>
+<td>Package feeds</td>
+<td><code>/etc/apk/repositories.d/&lt;name&gt;.list</code></td>
+<td>Indefinite</td>
+</tr>
+<tr>
+<td>Root password hash</td>
+<td><code>/etc/shadow</code>, written by <code>busybox passwd</code></td>
+<td>Indefinite</td>
+</tr>
+<tr>
+<td>DHCP leases</td>
+<td><code>/tmp/dhcp.leases</code>, <code>ubus call dhcp ipv6leases</code> of odhcpd</td>
+<td>Daemon-managed</td>
+</tr>
+<tr>
+<td>Routing table names (read)</td>
+<td><code>/etc/iproute2/rt_tables</code></td>
+<td>Operator-managed, base-files conffile</td>
+</tr>
+<tr>
+<td>Service names (read)</td>
+<td><code>/etc/services</code></td>
+<td>Operator-managed, base-files conffile</td>
+</tr>
+<tr>
+<td>Rate-limit buckets</td>
+<td><code>/var/run/uapi-ratelimit/</code></td>
+<td>Until the first mint or revoke after the token is revoked or expires, else until reboot. One that a request in flight at the revoke writes waits for the next</td>
+</tr>
+<tr>
+<td>Idempotency cache</td>
+<td><code>/var/run/uapi-idempotency/</code></td>
+<td>24 h, removed by the next store after that</td>
+</tr>
+<tr>
+<td>Metrics counters</td>
+<td><code>/var/run/uapi-metrics/</code></td>
+<td>Until reboot. A token's series fold into <code>token_id="-retired"</code> at the first mint or revoke after it is revoked or expires. A token that revokes itself, or that has a request in flight at its revoke, keeps that series until the next</td>
+</tr>
+<tr>
+<td>Recent errors</td>
+<td><code>/var/run/uapi-error-ring/</code></td>
+<td>The last 20, until reboot</td>
+</tr>
+<tr>
+<td>Token last-used sentinel</td>
+<td><code>/var/run/uapi-token-update/</code></td>
+<td>Until the first mint or revoke after the token is revoked or expires, else until reboot. One that a request in flight at the revoke writes waits for the next</td>
+</tr>
+<tr>
+<td>Interrupted-write journal</td>
+<td><code>/var/run/uapi-interrupted-writes/</code></td>
+<td>Until reboot. Each record is named by the pid and the start time of its request process, and removed when its write returns. A write that throws or is killed keeps it, because its commit may have landed. A record whose process is gone, or whose pid another process now holds, is reported by <code>/uapi/diagnostics</code> under <code>interrupted_writes</code></td>
+</tr>
+<tr>
+<td>WireGuard preshared key</td>
+<td><code>/var/run/uapi.wg.psk</code>, mode 0600</td>
+<td>One <code>wg set</code>, unlinked when <code>wg</code> returns</td>
+</tr>
+<tr>
+<td>Apk install lock</td>
+<td>(apk-internal)</td>
+<td>Per-operation</td>
+</tr>
+<tr>
+<td>uapi global flock</td>
+<td><code>/var/lock/uapi.lock</code></td>
+<td>Per-transaction</td>
+</tr>
+<tr>
+<td>uapi per-package flock</td>
+<td><code>/var/lock/uapi.pkg.&lt;pkg&gt;.lock</code></td>
+<td>Per-transaction</td>
+</tr>
+</tbody>
+</table>
+<p>uapi keeps the rate-limit buckets, the idempotency cache, the metrics
+counters, the recent errors, the last-used sentinels and the interrupted-write
+journal under <code>/var/run</code>, in directories of mode 0700 with files of mode 0600.
+It uses one only when <code>state_dir.owned()</code> accepts it: a directory owned by
+the effective uid of the request process, that neither the group nor others
+can write. One of its own with another mode is narrowed to 0700. A package
+install or upgrade, after its uhttpd restart, removes these six directories
+and the four that an older uapi kept in <code>/tmp</code>, each when it is a directory
+that root owns. A request of the older version still in flight at the restart
+can write one of them again.</p>
+<p><code>/var/run</code> is tmpfs on OpenWrt, as <code>/var</code> is <code>/tmp</code>: rate-limit buckets,
+idempotency entries, metrics counters, recent errors, sentinels and
+interrupted-write records reset on reboot. This is acceptable: operational
+counters that span uptime aren't a
+uapi responsibility - point a <code>node_exporter</code> or central collector at the
+box and aggregate there.</p>
+<p><code>GET /uapi/diagnostics</code> reports in <code>state_dirs</code> whether uapi uses each of these
+directories, as it finds them. <code>docs/operations.md</code> § Diagnostics says what
+each value means and costs, and which directories the request itself creates
+before the read.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/architecture.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/architecture.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

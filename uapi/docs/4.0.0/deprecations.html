@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uapi deprecations log - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / uapi deprecations log</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="uapi-deprecations-log">uapi deprecations log</h1>
+<p>Canonical list of wire-surface fields that have been deprecated but are still
+accepted during a deprecation window. Each entry lives here from the release
+that deprecated it through the release that removes it.</p>
+<p>A field is in the table below if and only if it is currently
+accepted-but-deprecated. Once removed (in a major release), the entry moves to
+the "Removed in past releases" section. A breaking change that is not a
+removal or a rename, such as a value that a write now refuses or a read that
+changes, needs no announcement here. The migration doc of the next major and
+its CHANGELOG entry describe it.</p>
+<p>Policy: a deprecation in a minor release means both forms (old and new) are
+accepted; the old form is marked <code>deprecated: true</code> in <code>build/openapi.json</code> so
+codegen tools surface a warning; the removal of the old form happens no sooner
+than the next major. One exception to the marker, explained under "How to
+migrate": a field that is not disappearing but losing only its write half cannot
+say so through that flag, because it has no read/write split.</p>
+<h2 id="active-deprecations">Active deprecations</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Replaced by</th>
+<th>Deprecated since</th>
+<th>Removal target</th>
+<th>Migration</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Every entry above must also appear in the published spec's own description,
+under
+"Upcoming in v4". That is checked by <code>make lint-doc-refs</code>.</p>
+<p>A field belongs in this section if and only if it is currently
+accepted-but-deprecated. Once
+removed in a major it moves to <code>Removed in past releases</code> below.</p>
+<h2 id="how-to-migrate">How to migrate</h2>
+<p>For each deprecated input field your client sends, switch to the replacement
+column. uapi accepts both during the window, so the migration can be staged:
+update writes first, observe nothing breaks, then drop the old field. Reads do
+not change during the window. When the release that opens a window also changes
+a read, its row says so.</p>
+<p>The OpenAPI spec at <code>/openapi.json</code> carries <code>deprecated: true</code> on every
+deprecated request field that disappears as a whole. Codegen tools that respect
+that flag (openapi-generator, oapi-codegen, etc.) will emit warnings in the
+generated client when you regenerate; that's the signal your client has surface
+area to migrate.</p>
+<p>A field that stays and loses only a write form carries no flag, and deliberately
+so. OpenAPI's <code>deprecated</code> is a property-level flag with no read/write split, so
+setting it would tell a generator the field was disappearing.
+<code>network/interfaces.ipaddr</code> was the first case: it survived as a read field and
+lost its write half, and the v3 spec says it precisely, with <code>readOnly: true</code> in
+the response schema and no <code>ipaddr</code> at all in the request one.
+<code>network/interfaces.ip6prefix</code> was the second case: it kept its array form and
+lost only the string form on write in 4.0.0. While a window is open, the
+announcement lives in this table and in the field's own <code>description</code>, which is
+the honest signal available.</p>
+<h2 id="announced-response-shape-changes">Announced response-shape changes</h2>
+<p>v4 ships every change that 3.x announced here, and <code>docs/migration-v3-to-v4.md</code>
+says what each one changes for a client. Since 4.0.0 such a change needs no
+announcement. A maintainer can still list one here ahead of v5, mirrored in the
+published spec's own "Upcoming in v5" block, which <code>make lint-doc-refs</code> keeps
+in sync with this section by count.</p>
+<h2 id="removed-in-past-releases">Removed in past releases</h2>
+<h3 id="400">4.0.0</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Replaced by</th>
+<th>Deprecated since</th>
+<th>Removed in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>network/interfaces.ip6prefix</code> (a string on write)</td>
+<td>an array of prefixes</td>
+<td>3.2.0</td>
+<td>4.0.0</td>
+</tr>
+</tbody>
+</table>
+<p>A space-separated string is refused with 422 <code>invalid_type</code>. Send an array,
+which is also what the read has returned since 3.2.0. A one-element array is
+still stored as a scalar, which netifd, 6rd, map and 464xlat read the same way,
+so the stored form does not change. No <code>deprecated: true</code> flag was ever set on
+it, for the reason given under "How to migrate".</p>
+<p>Also removed in 4.0.0, without an announcement in 3.x:</p>
+<ul>
+<li><strong><code>openvpn/instances</code>, the whole endpoint, with the paths <code>openvpn</code> and
+  <code>openvpn:instances</code> of the scope tree.</strong> On OpenWrt main, the only platform
+  of 4.x, the openvpn package runs a tunnel as a netifd protocol and has no init
+  script, so the endpoint read sections that nothing runs and each write
+  answered 503 <code>init_script_missing</code>. A tunnel is now a <code>network/interfaces</code>
+  section with <code>proto: "openvpn"</code>. The policy above asks for a deprecation in a
+  3.x minor first. v3 takes no more releases, and the path cannot work on the
+  platform of 4.x, so the maintainer made an exception (#466).
+  <code>docs/migration-v3-to-v4.md</code> has the field map and what a stored token does.</li>
+</ul>
+<h3 id="300">3.0.0</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Replaced by</th>
+<th>Deprecated since</th>
+<th>Removed in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>network/interfaces.name</code> (request input)</td>
+<td><code>network/interfaces.id</code></td>
+<td>2.2.0</td>
+<td>3.0.0</td>
+</tr>
+<tr>
+<td><code>dhcp/hosts.mac</code> (request and response)</td>
+<td><code>dhcp/hosts.macs</code></td>
+<td>2.5.0</td>
+<td>3.0.0</td>
+</tr>
+<tr>
+<td><code>dhcp/hosts.mac_aliases</code> (request and response)</td>
+<td><code>dhcp/hosts.macs</code></td>
+<td>2.5.0</td>
+<td>3.0.0</td>
+</tr>
+</tbody>
+</table>
+<p>Also removed in 3.0.0, announced as response-shape changes rather than as ledger
+rows because
+neither survived as a read:</p>
+<ul>
+<li><strong><code>vnstat/interfaces</code>, the whole endpoint.</strong> It modelled <code>config interface</code>
+  sections, which
+  vnstat never reads. Use the <code>interfaces</code> array on <code>vnstat/config</code>, remembering
+  that the values
+  differ in kind: the dead endpoint took uci interface names (<code>lan</code>), vnstat
+  wants device names
+  (<code>br-lan</code>).</li>
+<li>
+<p><strong>The 27 fields that wrote a uci option no OpenWrt component reads</strong>, in
+  <code>mwan3/globals</code>,
+  <code>vnstat/config</code>, <code>lldpd/config</code>, <code>unbound/server</code>, <code>usteer/config</code> and
+  <code>prometheus_node_exporter_lua/config</code>. Writes carrying them were already
+  ignored; what changes
+  is the read side, since each was returned with a <code>default:</code> annotation. The
+  per-field reasons
+  are in the 2.5.0 announcement, preserved in that release's changelog entry.</p>
+</li>
+<li>
+<p><strong>List-valued fields read back <code>null</code>, not <code>[]</code>, when the uci key is absent.</strong>
+  uci cannot
+  store an empty list, so <code>[]</code> already meant "absent" and distinguished nothing.
+  It also lets a
+  list field carry <code>x-uapi-clear-on-omit</code>, which the old shape made impossible.
+  The request and
+  response envelopes keep <code>[]</code>, where it means empty rather than absent.</p>
+</li>
+<li>
+<p><strong><code>network/interfaces.ipaddr</code> lost its write half.</strong> It is <code>readOnly</code> in the
+  response schema
+  and absent from the request one. It still reads as the first entry of the uci
+  <code>list ipaddr</code>;
+  send <code>ipaddrs</code>.</p>
+</li>
+<li><strong><code>dhcp/hosts.tag</code> is array-only in both directions.</strong> The string form existed
+  only because
+  the 2.4.1 spec declared one.</li>
+<li><strong><code>managed</code> left the request half of every resource schema.</strong> It is derived
+  from uci's
+  <code>.anonymous</code> flag and no write path ever read it.</li>
+<li><strong>Every resource is described by a separate request schema and response
+  schema</strong>, named
+  <code>&lt;Name&gt;Request</code> and <code>&lt;Name&gt;Response</code>. This is what makes the three above
+  expressible: one
+  schema serving both directions could not say that a field is readable but not
+  writable.</li>
+</ul>
+<p>See <code>docs/migration-v2-to-v3.md</code> for the full upgrade path.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/deprecations.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/deprecations.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

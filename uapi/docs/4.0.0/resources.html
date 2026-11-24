@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curated resources - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / Curated resources</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="curated-resources">Curated resources</h1>
+<p>This document indexes the 43 curated resources shipped in v4.x. For the full
+schema (every field, its type, enum values, ranges, patterns), read
+<code>build/openapi.json</code> (also served at <code>/api/v4/openapi.json</code> on a live
+router) or open it in Swagger UI. Per-resource sample curls live in
+<code>examples/curl/</code>.</p>
+<p><code>GET /schema/&lt;package&gt;/&lt;resource&gt;</code> serves a module's declared properties as one
+set, without the request and response split the OpenAPI document makes. It is
+the module's own view: a property marked <code>readOnly</code> there is absent from that
+resource's <code>*Request</code> schema, a property marked <code>x-uapi-read-nullable</code> has
+<code>null</code> added to its type (and to its <code>enum</code>) in both halves, as the next
+paragraph explains, the keywords under a property's <code>x-uapi-write</code> (such as
+<code>minimum: 68</code> on <code>mtu</code>) apply only in the <code>*Request</code> schema, those under its
+<code>x-uapi-read</code> (the integer type of a route <code>table</code>) only in the <code>*Response</code>
+schema, a string marked <code>x-uapi-multiline</code> takes a newline on write, and <code>id</code>,
+<code>managed</code> and <code>runtime</code> are stamped by the framework rather than declared by the
+module. For the two halves, read <code>build/openapi.json</code>.</p>
+<p><code>x-uapi-read-nullable</code> marks a property a read can answer null for, and widens
+its type (and
+<code>enum</code>) with null in <strong>both</strong> halves. Both, because every IaC apply is a
+read-modify-write: the
+response view goes back out as the next request body, so a request schema that
+refused those
+nulls would describe the round trip as invalid while the server accepts it.
+Widening does not
+weaken a required field, since the type is not what guards one;
+<code>resource.validate()</code> is, and it
+answers 422 naming the field for a null <code>target</code> on a create.
+<code>tests/lint_response_nullability.uc</code> calls each resource's real <code>fromUci</code> on a
+bare section and
+fails if anything it returns null for is not null-permitted in the response
+schema.</p>
+<p>Every resource answers <code>runtime</code>, an object that its response schema requires
+(#322): the curated ones, the non-uci ones and each item of a read-only
+collection. It is <code>{}</code> where the resource reads no live state, and on a
+collection item, which is itself the live state. <code>/raw</code> answers the uci section
+and no <code>runtime</code>: it reads no live state, and the key would hide an option of
+that name. The special endpoints under <code>/uapi/</code> are not resources.</p>
+<p>The authoritative inventory is the OpenAPI spec; if this document drifts,
+the spec wins.</p>
+<h2 id="the-daemon-must-be-installed-first">The daemon must be installed first</h2>
+<p>Curated resources that drive a daemon shipped as a separate OpenWrt
+package (<code>unbound/server</code>, <code>sqm/queues</code>, <code>snmpd/*</code>, <code>mwan3/*</code>,
+<code>vnstat/config</code>, <code>usteer/config</code>, <code>lldpd/config</code>,
+<code>prometheus_node_exporter_lua/config</code>,
+<code>uhttpd/instances</code> beyond <code>main</code>) need the underlying package installed
+before writes succeed. Writing to a resource whose daemon is absent
+returns <code>503 init_script_missing</code> with the missing
+<code>/etc/init.d/&lt;service&gt;</code> path in the response body, before any uci
+write. The pre-flight check is part of the atomic transaction recipe;
+no partial state is left behind.</p>
+<p>The uci config file has to exist too. <code>wireless/devices</code> and
+<code>wireless/interfaces</code> need <code>/etc/config/wireless</code>, which only
+wifi-scripts creates, with <code>wifi config</code> when it finds a radio. LuCI
+never creates a radio section. On a router or an image without it, a
+write answers <code>503 config_missing</code> with the missing path, before any uci
+write. That includes a PUT or PATCH of an id that a GET answers 404 for,
+as with <code>init_script_missing</code>. A DELETE answers 404, because no section
+can exist there, and a client reads that as already gone. A DELETE in a
+<code>POST /uapi/batch</code> answers the 503, because the batch commits as one write. A
+read answers an empty list. The same applies to any package whose file
+was removed. An empty file is enough.</p>
+<p>Install the daemon either out of band (<code>apk add unbound</code>, etc.) or
+through uapi itself via <code>POST /api/v4/packages/installed</code>. The latter
+is what a Terraform configuration would chain via <code>depends_on</code> on a
+<code>uapi_package</code> resource. The base uapi package's <code>Depends:</code> only
+covers what uapi <em>itself</em> needs to run (uhttpd, ucode mods); per-daemon
+packages are deliberately not pulled in.</p>
+<h2 id="network">Network</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>network/interfaces</code></td>
+<td><code>config interface</code></td>
+<td>Protos static, dhcp, dhcpv6, pppoe, ppp, wwan, wireguard, openvpn and none. Optional <code>id</code> picks the section name at create time (uci section-name charset, 32 chars, tightened to 15 for <code>proto=wireguard</code> because netifd uses it as the kernel netdev name). Absent, the server emits a 14-char <code>wg_&lt;rand&gt;</code> for wireguard, a 15-char <code>vpn_&lt;rand&gt;</code> for openvpn, or a 28-char ULID otherwise. <code>runtime</code> block carries live ubus state (uptime, ipv4/ipv6 addresses, route table). Some fields apply only to some protos, as the <code>allOf</code> entries on <code>proto</code> in the spec say: a read omits the others, a write that names one with a value other than null, <code>""</code> or <code>[]</code> answers <code>422 conflict</code>, and a proto switch removes the old proto's options, <code>private_key</code> included, by PATCH as by PUT. Proto openvpn, which <code>/lib/netifd/proto/openvpn.sh</code> of the openvpn package runs on OpenWrt main, takes the handler options that the 3.x <code>openvpn/instances</code> modelled, under the uci option names that the handler reads, so the transport is <code>ovpnproto</code>. Each reads as netifd hands it to the handler, and the description of each starts with the clause <code>proto openvpn only</code>. <code>key</code>, <code>tls_auth</code>, <code>pkcs12</code>, <code>password</code> and <code>cert_password</code> are write-only, and a read gives <code>has_key</code>, <code>has_tls_auth</code>, <code>has_pkcs12</code>, <code>has_password</code> and <code>has_cert_password</code>. <code>data_ciphers</code> takes one entry, since openvpn keeps only the last <code>--data-ciphers</code>. <code>peerdns</code> and <code>nohostroute</code> apply to openvpn too. <code>username</code>, the write-only <code>password</code> and <code>has_password</code> apply to pppoe, ppp and wwan as well, and their descriptions name the four protos: <code>ppp.sh</code> gives both to pppd, and wwan gives both to the handler of the modem that it finds, such as qmi or mbim. Each proto sends the login to another party, so a write that changes <code>proto</code> removes both, unless that write sends them, as LuCI's protocol switch does. This also holds between two of these protos, and on a switch from a proto that uapi does not model, whose read hides them. The options that netifd reads for every proto (<code>metric</code>, <code>defaultroute</code>, <code>delegate</code>, <code>ip4table</code>, <code>ip6table</code>, <code>dns</code>, <code>mtu</code>, the <code>ip6assign</code> group) apply to all of them. netifd applies <code>mtu</code> to the interface's device only when that device has no <code>config device</code> section of its own, as <code>br-lan</code> has in the stock configuration, and to every device that joins the interface later, such as a Wi-Fi netdev. A device with its own section takes its MTU from <code>network/devices</code>. On ppp and pppoe, <code>mtu</code> goes to pppd, which takes 128 to 16384. netifd parses no <code>listen_port</code>, and the wireguard handler gives wg the number that ucode's <code>int()</code> reads from the stored value, so <code>listen_port</code> reads that number: a service name reads null, since the handler gives wg no port for it and wg listens on a port that the kernel picks, and a number outside 0 to 65535 reads -1, which blocks every write of the interface. A write that leaves a wireguard interface enabled, such as a switch to wireguard, an enable or a change of <code>listen_port</code>, keeps its commit while one of its enabled <code>network/wireguard_peers</code> holds a value that makes wg refuse the whole interface, and answers <code>X-Kernel-Status: blocked</code> with <code>X-Kernel-Blocked</code>, which names each such peer: netifd restarts the interface, and the interface does not come up. A PATCH that switches an interface to wireguard and does not send a port answers <code>422 conflict</code> on <code>listen_port</code> while uci holds a hand-written value that reads -1, which the read of the old proto does not show: send a port, or switch with a PUT, which removes it. On a proto that uapi does not model, such as <code>6in4</code> or the <code>qmi</code> that an LTE router ships, a read shows the modelled options that uci stores, but leaves out the openvpn options, <code>username</code> and <code>password</code> among them. A POST or PUT answers <code>422 not_in_enum</code>, and a PATCH that leaves <code>proto</code> out refuses only <code>broadcast_flag</code> and the openvpn options, and keeps the options of the proto's handler. netifd takes such a proto, so it is no error of the section, and the validation sweep does not list it. On such a proto, a write stores one value of <code>ipaddrs</code>, <code>ip6addrs</code> or <code>ip6prefix</code> as an option, as LuCI writes it. netifd hands a uci list to a handler only for an option that the handler declares as a list in <code>ubus call network get_proto_handlers</code>, and 6in4, gre, ipip and vxlan declare <code>ipaddr</code> as one value. So several values for such an option, or one value stored as a list, are an error of the section with <code>422 conflict</code>, and a PATCH that sends the value stores it as an option.</td>
+</tr>
+<tr>
+<td><code>network/devices</code></td>
+<td><code>config device</code></td>
+<td>Bridges, VLANs (8021q/8021ad), macvlan, veth, tun/tap. <code>mtu</code> below 68 is refused on write, because netifd ignores it. A stored one reads as it is.</td>
+</tr>
+<tr>
+<td><code>network/routes</code></td>
+<td><code>config route</code></td>
+<td>Static routes; cross-refs interface. <code>table</code> reads a stored name as its id (253 <code>default</code>, 254 <code>main</code>, 255 <code>local</code>, or the id in <code>/etc/iproute2/rt_tables</code>), and 0 when netifd cannot resolve it and drops the route. A write takes an id from 1 to 4294967295, or a table name, which is resolved like netifd resolves it and stored as its id; a name that does not resolve answers 422, as does an id of 0.</td>
+</tr>
+<tr>
+<td><code>network/rules</code></td>
+<td><code>config rule</code></td>
+<td>Policy routing. <code>lookup</code> reads and writes like the <code>table</code> of <code>network/routes</code>: the read answers the id, a write takes an id or a table name stored as its id. netifd parses no <code>lookup</code> or <code>goto</code> action: a rule without <code>action</code> is a goto rule when <code>goto</code> is set and a lookup rule otherwise, so a read derives <code>action</code> that way and a write stores no action for those two. A <code>goto</code> must jump forward, past <code>priority</code>, and goes only with action goto. A rule needs no selector, as for netifd, the kernel and LuCI. Such a rule matches every packet, so with a table that holds a default route it routes all traffic, the management session included, and without a <code>priority</code> netifd numbers it by its place among the rules, from 1 up, ahead of <code>main</code>. LuCI allows the same. <code>suppress_prefixlength</code> and <code>tos</code> read as netifd reads an integer, like <code>priority</code>. <code>ipproto</code> reads a decimal as an integer, and the other spellings that netifd takes, such as <code>06</code> or <code>tcp</code>, as uci holds them. <code>uidrange</code>, <code>sport</code> and <code>dport</code> read as uci holds them. Each reads null when unset. A write takes an integer from 0 to 32 for <code>suppress_prefixlength</code> and from 1 to 255 for <code>ipproto</code>, as LuCI's form does, a <code>tos</code> of 0, 4, 8, 12, 16, 20, 24 or 28, and ports from 1 to 65534 and uids from 0 to 4294967294 as plain decimals, alone or as a range that does not run backwards. A stored value in another form blocks every write of the rule until a write replaces it. The validation sweep lists it, live when netifd drops the enabled rule or the kernel refuses it.</td>
+</tr>
+<tr>
+<td><code>network/bridge_vlans</code></td>
+<td><code>config bridge-vlan</code></td>
+<td>Bridge VLAN tagging (vlan 1-4094 + port spec).</td>
+</tr>
+<tr>
+<td><code>network/wireguard_peers</code></td>
+<td><code>config wireguard_&lt;iface&gt;</code> (dynamic)</td>
+<td>Peers on a wireguard interface; preshared_key masked on read. <code>endpoint_port</code> reads a service name such as <code>https</code> as its port from <code>/etc/services</code>, as the proto handler resolves it, and 0 for a value that the handler cannot read. A peer with a host and no port reads <code>endpoint_port</code> null, and the proto handler, the kernel apply and the restore give wg port 51820 for it. The handler gives wg an IPv6 address as it stands, and musl's getaddrinfo takes a %zone of digits up to 4294967295 on any address, and the name of an interface only on a link-local or multicast link-local address. wg refuses the config of the whole interface for any other zone. A write refuses such a zone with <code>invalid_format</code>, a stored one too. A write that sends a zone that names no interface of the router, for an enabled peer with a key, answers <code>422 conflict</code>. The handler gives wg a host of only digits and dots as it stands, so a write refuses one that inet_aton does not read, such as <code>10.0.0.256</code>, with <code>invalid_format</code>, a stored one too, because wg then refuses the config of the whole interface. The handler looks up every other host with nslookup, leaves out the endpoint of one for which nslookup prints no address, and keeps the peer, so the write sets the peer without it and answers <code>X-Kernel-Status: omitted</code>. Apart from the <code>invalid_format</code> rules, a stored host is not checked, because a name or an interface can exist at one time and not at another. The handler gives wg every peer of an interface at once, so one enabled peer with a value for which wg refuses the config, such as an allowed IP that wg cannot parse or a stored zone that names no interface of the router, keeps the whole interface down. A write of another peer of such an interface keeps its commit and answers <code>X-Kernel-Status: blocked</code> with <code>X-Kernel-Blocked</code>, which names that peer, as LuCI saves the write and the interface stays down. It does not wait for the restart of the interface. The validation sweep lists such a peer with code <code>conflict</code> on the field <code>""</code>. A write that fixes, disables or deletes the peer takes the usual path. <code>persistent_keepalive</code> reads <code>off</code> as 0, and -1 for a stored value that the handler leaves out. <code>allowed_ips</code> is optional, as in LuCI, and a peer without it is set in the kernel with none. <code>allowed_ips</code> reads the entries as wg gets them: the handler takes a list as its entries and an option as its words, joins them with commas and expands no escape, and wg cuts the line at <code>#</code> and splits it at commas. So a comma separates two entries, and a list entry that holds a space reads as one entry, which wg refuses, and so does a write, on a disabled peer too. A value that wg reads as nothing, such as one that starts with <code>#</code>, reads as one empty entry, because the handler still writes the line and wg refuses it. The routes of <code>route_allowed_ips</code> go to each entry as stored, past a <code>#</code> too, as the handler installs them: the address before the first <code>/</code> and the length that ucode's <code>int()</code> reads after it. A write refuses a key that is not a WireGuard key as uci holds it, as <code>wg genkey</code> prints it, a stored one too, and a peer that stores such a key still takes a DELETE. The handler matches a key as uci holds it. It skips a peer whose <code>public_key</code> does not match, with its routes, and leaves out a <code>preshared_key</code> that does not, so a stored key with whitespace or a <code>#</code> comment, or one that uci holds as a list, is an error too. Neither a write of the peers nor one of <code>network/interfaces</code> takes the other values of a peer that the handler skips as values that keep the interface down. The restore after a failed write sets a peer whose stored <code>preshared_key</code> is not a WireGuard key without one, as the handler does. <code>runtime</code> carries what the kernel holds for the peer, from one <code>wg show &lt;iface&gt; dump</code> for each interface that a request reads: <code>in_kernel</code>, under the stored <code>public_key</code>, the <code>endpoint</code>, <code>allowed_ips</code> and <code>persistent_keepalive</code> of the kernel beside the fields that uci holds, and <code>latest_handshake</code>, <code>rx_bytes</code> and <code>tx_bytes</code>. uapi compares nothing and corrects nothing, so a client sees a peer that <code>wg</code> changed by hand, or that a failed apply left behind. Only a GET reads <code>runtime</code>: unlike the other resources, a write answers <code>runtime: {}</code> and reads no kernel state, since the kernel apply comes after its body, and <code>X-Kernel-Status</code> says whether the apply landed. A GET in a <code>/uapi/batch</code> that writes answers <code>{}</code> too, since it runs before the apply of the batch. <code>runtime</code> is also <code>{}</code> when uapi did not read the kernel, because the interface is not up, wg fails or wg prints a dump in a shape that uapi does not read. <code>runtime.allowed_ips</code> is in the form that the kernel prints, with the host bits cleared and IPv6 in its short form, and two peers that store the same key both report the one peer of the kernel.</td>
+</tr>
+<tr>
+<td><code>network/wireguard_kernel_peers</code> (read-only collection)</td>
+<td><code>wg show &lt;iface&gt; dump</code></td>
+<td>The WireGuard peers the kernel holds that no uci section of their interface claims, on up interfaces with proto=wireguard: what a hand <code>wg set</code> added or a failed apply left, which no other read reports. Keyed as wg reads the stored key, the later <code>PublicKey=</code> lines of one included, and disabled sections included, because the <code>runtime</code> of a disabled section already reports a peer the kernel holds under its key. One dump per interface per request, the same one the <code>runtime</code> reads. A down interface or a failing <code>wg</code> lists nothing, as <code>runtime</code> answers <code>{}</code>. The stable <code>id</code> is the first 12 hex of the sha256 of the interface name and the public key. No write, no lock, no ETag.</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>option disabled</code> is modelled on <code>network/interfaces</code>, <code>network/routes</code> and
+<code>network/rules</code>.</strong> netifd drops a disabled section outright on all three. A
+disabled interface is never registered, so it has no ubus object and its
+addresses and routes are absent. A disabled route or rule is never installed.
+<code>network/wireguard_peers</code> models <code>disabled</code> as well.</p>
+<p>All three read the option as netifd parses it, with <code>platform_bool</code>. On the
+interface, netifd compares the value against <code>1</code> and, since netifd <code>e97e36f</code>
+(committed 2026-07-17), against <code>true</code>. On routes and rules, the value goes
+through the boolean blob converter, which takes the same two. <code>on</code>, <code>yes</code> and
+any other value read false. A unit test pins the reading.</p>
+<p><a href="https://github.com/openwrt-iac/uapi/issues/64">#64</a> tracked the gap. Two
+alternatives were turned down:</p>
+<ul>
+<li>Ship <code>disabled</code> on routes and rules first, and wait for upstream on the
+  interface. The interface is where disabling matters most, because it takes
+  the addresses, routes and peers with it. <code>disabled</code> on two of three sibling
+  resources is also an asymmetry that no operator can explain from outside.</li>
+<li>Read the flag one way on all three, and let <code>runtime</code> show the disagreement,
+  as <code>effective_proto</code> does for the proto. But <code>disabled: true</code> with
+  <code>runtime.up: false</code> cannot tell a disabled interface from an enabled one that
+  failed, and that is the case an operator most needs to tell apart.</li>
+</ul>
+<p>Reload: <code>network</code> (netifd), then <code>odhcpd</code> while procd holds a <code>config.change</code>
+trigger for it, under the rule of a <code>dhcp</code> write below. odhcpd reads the network
+config and has a procd trigger on <code>network</code>, which a commit through libuci does
+not fire. So a network write runs one more init script while procd holds that
+trigger, <code>/etc/init.d/odhcpd reload</code>, which sends odhcpd a signal, and holds the
+global SH and the lock of <code>network</code> while it runs, so a non-uci write at that
+moment answers <code>423 locked</code>. If that reload exits non-zero, the write answers
+<code>500 reload_failed_restored</code> and restores the previous config, or <code>500
+reload_failed_unrecovered</code> when the reload fails on that config too. A LuCI save
+of <code>network</code> also reloads dnsmasq and unbound, because LuCI's ucitrack has
+<code>network</code> affect <code>dhcp</code>. uapi leaves them out on purpose: from this package
+dnsmasq.init reads only <code>ula_prefix</code> of the globals, which no resource here
+writes, and unbound that and the names of the interface sections, and both
+reload on the netifd events of the interfaces that they serve (<code>docs/raw.md</code>).
+So a network write takes no lock of <code>unbound</code> and does not wait for unbound.</p>
+<p><strong>Editing the interface that backs your management connection is dangerous.</strong>
+<code>/etc/init.d/network reload</code> returns exit 0 even when an interface fails to
+come up at runtime; uapi only sees the init script's exit code, not the
+daemon's runtime convergence.</p>
+<h2 id="firewall">Firewall</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>firewall/zones</code></td>
+<td><code>config zone</code></td>
+<td><code>input</code>, <code>output_policy</code> and <code>forward</code> policies, <code>network</code> list. A policy that the zone does not set reads null: fw4 then applies the one of <code>firewall/defaults</code>, and DROP when that has none. The three policies carry <code>x-uapi-clear-on-omit</code>: a PUT that leaves one out, or a null, removes the option, and the zone takes the policy of <code>firewall/defaults</code> again. A PATCH that leaves one out keeps it. A write refuses a <code>name</code> that starts with a digit or a dash, since fw4 skips such a zone, and a stored one blocks every write of the section.</td>
+</tr>
+<tr>
+<td><code>firewall/rules</code></td>
+<td><code>config rule</code></td>
+<td>Nested <code>match: {src_zone, dest_zone, src_ip, dest_ip, src_port, dest_port, proto, family, mark, dscp}</code>. MARK and DSCP targets carry <code>set_mark</code> / <code>set_xmark</code> and <code>set_dscp</code>. <code>src_zone</code> is required only for NOTRACK, matching fw4. A read also gives the HELPER target that LuCI writes. A write refuses it, except in a PATCH that sends it back: a PUT removes the <code>set_helper</code> option, which uapi does not model, and firewall4 skips a HELPER rule without it.</td>
+</tr>
+<tr>
+<td><code>firewall/redirects</code></td>
+<td><code>config redirect</code></td>
+<td>DNAT + NAT loopback reflection. DNAT and SNAT. Every <code>match</code> field except <code>proto</code> is a scalar, because firewall4 refuses a list on them and drops the section. <code>match.src_dip</code> is the external address matched on a DNAT (and the address NAT reflection uses) and the rewrite source on an SNAT, where it is required along with a named <code>match.dest_zone</code>. Prefer <code>firewall/nat</code> for new source NAT; LuCI migrates these sections there.</td>
+</tr>
+<tr>
+<td><code>firewall/nat</code></td>
+<td><code>config nat</code></td>
+<td>Source NAT: SNAT (<code>snat_ip</code> / <code>snat_port</code>), MASQUERADE, or ACCEPT to exempt traffic from rewriting. <code>match.src_zone</code> is the outbound zone. An unset <code>match.family</code> means IPv4 only, which is fw4's default for NAT.</td>
+</tr>
+<tr>
+<td><code>firewall/forwardings</code></td>
+<td><code>config forwarding</code></td>
+<td>Zone-to-zone forwarding.</td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code> (singleton)</td>
+<td><code>config defaults</code></td>
+<td>Global verdicts, syn_flood, synflood_burst/rate, tcp_syncookies, flow_offloading. <code>syn_flood</code> reads what fw4 applies: <code>synflood_protect</code>, which LuCI writes, and <code>syn_flood</code> only when uci holds no <code>synflood_protect</code>. A write of true stores <code>synflood_protect</code> and removes <code>syn_flood</code>, as LuCI does. A write of false removes <code>synflood_protect</code> and stores <code>syn_flood</code> <code>0</code>, where LuCI removes both. <code>synflood_rate</code> reads as fw4 applies it, always with its unit, such as <code>25/second</code>, and a write also takes an integer, a rate per second. A rate that overflows 64 bits in the kernel with the burst, such as <code>1/minute</code> with a burst of 4294967295, answers 422 <code>out_of_range</code> and is an error of the section when stored, since fw4 then applies no ruleset while <code>syn_flood</code> is on. <code>synflood_burst</code> reads as fw4 parses it, so <code>0x10</code> reads 16. A bool or number option that fw4's parser refuses, such as a <code>synflood_rate</code> of <code>abc</code> or a <code>drop_invalid</code> of <code>YES</code>, reads null and is an error of the section, since fw4 then applies no ruleset. A write that sends the field replaces it. <code>syn_flood</code> reads null when either of its two options holds such a value, because fw4 parses both, and a write of <code>syn_flood</code> then replaces both. An unset bool reads <code>false</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Reload: <code>firewall</code> (fw4).</p>
+<p>A policy, a target, <code>reflection_src</code> and a family read as fw4 reads them: a
+choice in any case or a prefix of one, such as <code>accept</code> or <code>acc</code> for ACCEPT,
+and <code>all</code>, <code>*</code>, <code>inet</code> or a word with 4 or 6 for a family. A target that fw4
+replaces with its default, with a warning, reads as that default. A port or
+proto that uci holds as one option of several words reads as its words, as LuCI
+writes the ports of a rule. A match port, mark or DSCP takes a <code>!</code> with blanks
+around it, as LuCI writes it.</p>
+<p>fw4 skips a zone, forwarding, rule, redirect or nat section with a bool that
+its parser refuses: a list, or a value other than <code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code>,
+<code>0</code>, <code>off</code>, <code>false</code> or <code>no</code>. Such a value of <code>masq</code> or <code>mtu_fix</code> of a zone,
+<code>enabled</code>, or <code>reflection</code> of a redirect reads null and is an error of the
+section. A write that sends the field replaces it, a null removes it, and a PUT
+that leaves the field out removes it too. An unset bool reads its default.</p>
+<h2 id="wireless">Wireless</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>wireless/devices</code></td>
+<td><code>config wifi-device</code></td>
+<td>Radios (mac80211/broadcom), the <code>path</code>, <code>macaddr</code>, <code>phy</code> and <code>radio</code> that bind them to their hardware, band, channel, htmode, country, txpower, cell_density, legacy_rates.</td>
+</tr>
+<tr>
+<td><code>wireless/interfaces</code></td>
+<td><code>config wifi-iface</code></td>
+<td>SSIDs, with every 802.11r option of LuCI's WLAN roaming tab. <code>key</code>, <code>r0kh</code> and <code>r1kh</code> are write-only, and a PUT that leaves them out keeps them. Responses include <code>has_key</code>, <code>has_r0kh</code> and <code>has_r1kh</code>. <code>device</code> and <code>network</code> always read as an array, or null when unset: netifd takes a list or words split at any whitespace for either, and a read gives those words. A write takes a string or a list, and stores one radio or one network as a string, as LuCI and <code>wifi config</code> write it. <code>ssid</code>, <code>nasid</code>, <code>mobility_domain</code> and <code>r1_key_holder</code> always read as a string, or null when unset. For a list that uci holds, that string is the text that wifi-scripts gives the daemon: the JSON text of the list for <code>ssid</code>, such as <code>[ "home", "net" ]</code>, and the entries joined by spaces for the other three. A stored list is no error, and a write takes only a string. wifi-scripts writes <code>key</code>, <code>nasid</code>, <code>mobility_domain</code>, <code>r1_key_holder</code>, <code>r0kh</code> and <code>r1kh</code> into the daemon's config as lines, so a write refuses a newline in them, more than 1024 bytes in each of them but <code>key</code>, and a key holder entry that hostapd reads and cannot parse. A stored one blocks every write of the SSID, also while wifi-scripts does not set the SSID up, which it does only while the SSID and its radio are enabled. A write also refuses the values that the daemons refuse or misread: an <code>ssid</code> over 32 bytes, a <code>key</code> in a form that hostapd or wpa_supplicant refuses for the mode and encryption, a <code>nasid</code> over 253 bytes on an EAP access point, <code>ieee80211r</code> with owe on an access point, a <code>reassociation_deadline</code> outside 1000 to 65535, a <code>mobility_domain</code> other than 4 hex digits, an <code>r1_key_holder</code> other than 12, and an <code>encryption</code> that starts with <code>wep</code> in mode mesh, or where the router does not set WEP up. WEP needs the shell wifi-scripts and the daemon of the mode built with WEP: hostapd in mode ap, wpa_supplicant in mode sta or adhoc. The ucode wifi-scripts, which OpenWrt builds by default, give the daemon no WEP key, and the SSID runs without encryption. uapi asks <code>hostapd -vwep</code> or <code>wpa_supplicant -vwep</code>, as LuCI does, at most once per request and only for a WEP value. <code>encryption</code> also takes the <code>wep-open</code> and <code>wep-shared</code> that LuCI writes, under the same rule. A stored one of these blocks every write too, whether the daemon reads it yet or not. A write refuses mode <code>wds</code> and <code>ahdemo</code> too, which wifi-scripts skips as it skips a section without a mode, and a stored one is no error. hostapd reads <code>mobility_domain</code> as the mobility domain with 802.11r, and as the EAP domain of an access point with <code>fils</code>, which uapi does not model. That domain takes any form, so the sweep marks a newline or a length in <code>mobility_domain</code> live on an EAP access point too, and its form only with 802.11r. A write to <code>wireless/devices</code> that turns a radio on is refused while an enabled SSID of the radio holds any of these values. The validation sweep lists every SSID that holds such a value. These rules follow the ucode wifi-scripts, which OpenWrt main builds by default. They were not checked against the shell wifi-scripts, which OpenWrt 24.10 uses: uapi 4.x supports OpenWrt main and the next release cut from it, where the shell variant runs only on an image built without <code>CONFIG_WIFI_SCRIPTS_UCODE</code>. A write that sets an EAP mode needs <code>key</code>, and a stored EAP SSID without one, as LuCI writes it, is no error. A create or a PUT that sends no <code>mode</code> stores none, and so does a write that sends a null <code>mode</code>. wifi-scripts sets up nothing for such a section, and a read reports its mode as null. A write to it is still checked as mode <code>ap</code>, but none of its errors blocks turning its radio on. <code>runtime</code> carries iwinfo state.</td>
+</tr>
+</tbody>
+</table>
+<p>Reload: <code>network</code>. A LuCI save of <code>wireless</code> also reaches odhcpd, dnsmasq and
+unbound, because LuCI's ucitrack has <code>wireless</code> affect <code>network</code>, which affects
+<code>dhcp</code>. None of them reads <code>/etc/config/wireless</code>, so a wireless write leaves
+them out (<code>docs/raw.md</code>). Requires <code>rpcd-mod-iwinfo</code> at runtime for the
+<code>runtime</code> block on <code>wireless/interfaces</code>.</p>
+<h2 id="dhcp">DHCP</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dhcp/hosts</code></td>
+<td><code>config host</code></td>
+<td>Static leases. <code>macs</code> (the whole uci <code>list mac</code>), <code>ip</code>, <code>name</code>, <code>leasetime</code>, <code>duid</code>, <code>tag</code> (tags the host sets), <code>match_tag</code> (tags a request must carry). dnsmasq.init joins <code>mac</code> and <code>tag</code> with spaces and splits the words, so a list entry <code>a b</code> reads as two. A MAC octet can be <code>*</code>, which dnsmasq and LuCI take. odhcpd cannot parse such a MAC and skips the whole host.</td>
+</tr>
+<tr>
+<td><code>dhcp/servers</code></td>
+<td><code>config dhcp</code></td>
+<td>Per-interface server config. <code>runtime</code> carries active-lease counts. <code>dhcpv4</code>, <code>ra_flags</code> and <code>ra_slaac</code> are the options that odhcpd.defaults writes into the stock <code>lan</code> section. <code>ra_flags</code> reads null when unset, which odhcpd takes as <code>other-config</code> only, and <code>["none"]</code> sets no flag. A read gives the flags that odhcpd sets: uci passes it the words of an option split at spaces and tabs, or each list entry whole, and odhcpd stops at the first word that is no flag name. When it sets none, such as for an option of spaces, the read gives <code>["none"]</code>. <code>dhcpv4</code> takes the four modes of <code>ra</code>. odhcpd has no DHCPv4 relay, so dnsmasq and odhcpd both serve on every value but <code>disabled</code>, and odhcpd reads <code>dhcpv4</code> only when <code>dhcp/odhcpd</code> sets <code>maindhcp</code>. dnsmasq takes an unset <code>dhcpv4</code> as <code>disabled</code> (<code>dnsmasq.init</code>, <code>config_get dhcpv4 "$cfg" dhcpv4 disabled</code>), as odhcpd does. LuCI's DHCP setup writes <code>server</code>. <code>dhcp_option</code> takes one option per entry, because dnsmasq.init passes each entry to dnsmasq whole and dnsmasq reads it as one option. An entry answers <code>422 invalid_format</code> when, outside a quoted string, a field that reads as an address, such as <code>10.0.0.1</code> or <code>[::]</code>, is followed by whitespace and then by what starts a <code>dhcp-option</code> value: a number and a comma, <code>option:</code>, <code>option6:</code>, <code>tag:</code>, <code>net:</code>, <code>set:</code>, <code>vendor:</code>, <code>encap:</code> or <code>vi-encap:</code>, as in <code>3,10.0.0.1 6,10.0.0.1</code>. LuCI's form takes any entry. A text option with spaces, such as <code>15,my domain</code> or <code>15,my 6,domain</code>, stays valid. A stored entry that the rule refuses blocks every write of the section. Other entries that dnsmasq refuses, such as <code>3,10.0.0.1, 6,10.0.0.1</code>, pass the rule and are left to the <code>--test</code> check below.</td>
+</tr>
+<tr>
+<td><code>dhcp/dnsmasq</code> (singleton)</td>
+<td><code>config dnsmasq</code></td>
+<td>Global dnsmasq tuning; forwarders, address overrides, rebind protection. dnsmasq.init passes <code>server</code> and <code>address</code> with <code>config_list_foreach</code>, so an option of either reads null.</td>
+</tr>
+<tr>
+<td><code>dhcp/odhcpd</code> (singleton)</td>
+<td><code>config odhcpd</code></td>
+<td><code>maindhcp</code>, <code>leasefile</code>, <code>loglevel</code>. <code>maindhcp</code> reads true only for <code>1</code> in the section named <code>odhcpd</code>, which both daemons take. dnsmasq.init stops serving DHCPv4 for any number above 0 in that section, and odhcpd takes <code>true</code> too and keeps the value that it has for any other value or no option, since a reload does not reset it. A write that sends <code>maindhcp</code> stores <code>1</code> or <code>0</code> even when the read already gives that value, so that both daemons agree, and null removes the option. LuCI shows a value other than <code>1</code> unchecked and removes the option when it saves the form.</td>
+</tr>
+<tr>
+<td><code>dhcp/leases</code> (read-only collection)</td>
+<td><code>/tmp/dhcp.leases</code>; <code>?family=v6</code> reads <code>ubus call dhcp ipv6leases</code> of odhcpd, as LuCI does</td>
+<td>IPv4 leases from dnsmasq's lease file, or the bound IPv6 leases of odhcpd with <code>?family=v6</code> (merged in v4, #320), one entry per address or prefix. A <code>*</code> that dnsmasq writes for a missing host name or client id reads null, and so does the empty hostname that odhcpd gives. A hostname is the name that the client sent, which is not always a valid DNS name. A control byte, the backslash and each byte that is not part of valid UTF-8 read as <code>\x</code> and two lowercase hex digits, as LuCI shows them. Entry id is the MAC for v4, the IP for v6. Another <code>family</code> answers 400 <code>bad_request</code>, and the <code>Link</code> to the next page keeps the <code>family</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Reload: each write reloads the daemons that read what it writes, in this order,
+and each of them only while procd runs it. <code>dhcp/servers</code> and <code>dhcp/hosts</code>
+reload <code>dnsmasq</code>, <code>odhcpd</code> and <code>unbound</code>. odhcpd reads a server section too,
+<code>ra</code>, <code>dhcpv6</code> and <code>ra_default</code> among others, and the static leases of a host.
+unbound reads <code>interface</code> and <code>ignore</code> of a server section, and makes records of
+the <code>name</code> and <code>ip</code> of a host when its <code>add_extra_dns</code> is set. <code>dhcp/odhcpd</code>
+reloads <code>odhcpd</code>, <code>dnsmasq</code> and <code>unbound</code>, because dnsmasq.init reads <code>maindhcp</code>
+and unbound makes the directory of <code>leasefile</code>. <code>dhcp/dnsmasq</code> reloads <code>dnsmasq</code>
+and <code>unbound</code>, which reads <code>domain</code> and <code>port</code> when it forwards local names to
+dnsmasq. procd runs a daemon while it holds a <code>config.change</code> trigger for it,
+from the start of the service to its stop, whatever its instances show, which is
+when a LuCI save reloads it. A daemon that the router does not ship, that the
+operator stopped, or that has no such trigger yet, as unbound at boot until 3 s
+after the last interface event, is skipped: the write does not answer <code>503
+init_script_missing</code> for it, and its reload does not start it, as the reload of
+dnsmasq.init and unbound.init would. When the <code>service list</code> call fails, uapi
+cannot tell, and reloads the daemon. A write when none of them runs answers 2xx
+with <code>X-Reload-Status: no_reload</code>. LuCI saves through rpcd, which fires the
+procd reload trigger on <code>dhcp</code> of each daemon that procd lists with one. A
+commit through libuci fires none, so uapi runs the reloads above itself. A write
+takes the lock of <code>unbound</code> too while <code>/etc/init.d/unbound</code> exists, before it
+asks procd which daemons to reload, so a write to the <code>unbound</code> packages, or a
+<code>system</code> write that can reload unbound, at the same moment answers <code>423 locked</code>,
+whether unbound runs or not. When unbound ran before the write, it waits 2 s for
+unbound to keep running, as a write to <code>unbound/server</code> does.</p>
+<p>After a write that reloads dnsmasq, uapi runs the command of each dnsmasq
+instance with <code>--test</code> on the config that dnsmasq.init just wrote. If dnsmasq
+refuses it, the write answers <code>500 reload_failed_restored</code> and restores the
+previous config. dnsmasq refuses a line such as a <code>dhcp_option</code> of
+<code>3,not-an-address</code> in a section that it reads, one that is not ignored, on an
+interface that is up and static. The check covers every instance, one that is
+not running included, so on a router whose dnsmasq config was refused before the
+write, a write that does not fix it answers <code>500 reload_failed_unrecovered</code>. A
+<code>--test</code> that cannot run, because fork fails, fails the write in the same way. A
+<code>--test</code> that does not finish within 10 s, such as one that reads a <code>conf-file</code>
+on a mount that hangs, or that another <code>SIGKILL</code> stops, is killed and judges
+nothing: the write keeps its commit and answers 2xx with <code>X-Reload-Status:
+unverified</code>. A target that takes longer than 10 s to parse its config, such as a
+slow router with large adblock lists, answers <code>unverified</code> on every dhcp write.
+<code>--test</code> only parses: a config that dnsmasq parses but cannot start with, such
+as one whose port another daemon holds, still answers 2xx. No write waits for
+the daemon to start, and each pays one parse of the whole config per instance,
+which grows with its size, and again on a restore. A write that does not reload
+dnsmasq, because procd does not run it, runs no check. After every reload of
+dnsmasq, by a <code>system</code> or <code>system/timeservers</code> write too, uapi waits 1 s, and
+when procd gave up on a dnsmasq instance, it stops and starts dnsmasq once. The
+write keeps its commit, and answers <code>X-Reload-Status: stopped</code> when dnsmasq
+stays down, see <code>docs/operations.md</code>.</p>
+<h2 id="system">System</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system</code> (singleton)</td>
+<td><code>config system</code></td>
+<td>hostname, timezone, log_size, log_ip, log_proto, log_remote, urandom_seed. Reloads <code>system</code> and <code>log</code>, then <code>dnsmasq</code>, <code>odhcpd</code> and <code>unbound</code> while procd runs each: dnsmasq.init and unbound read the hostname, and odhcpd the timezone. It runs no <code>dnsmasq --test</code> check. While <code>/etc/init.d/unbound</code> exists, the write takes the lock of <code>unbound</code>, so a write to <code>unbound/server</code>, <code>unbound/srv</code>, <code>unbound/ext</code> or the <code>dhcp</code> package at the same moment answers <code>423 locked</code>, whether unbound runs or not, and when unbound ran before the write, it waits 2 s for unbound to keep running.</td>
+</tr>
+<tr>
+<td><code>system/timeservers</code></td>
+<td><code>config timeserver</code></td>
+<td>NTP server list; reloads sysntpd, then <code>dnsmasq</code> while procd runs it, because dnsmasq.init reads <code>enabled</code> for DNSSEC. It runs no <code>dnsmasq --test</code> check.</td>
+</tr>
+<tr>
+<td><code>system/password</code></td>
+<td><code>/bin/busybox passwd</code> (non-uci, write-only)</td>
+<td><code>POST {user, password}</code> -&gt; 204. A user that <code>/etc/passwd</code> does not hold answers 422 <code>conflict</code>. Audit-logged without password.</td>
+</tr>
+<tr>
+<td><code>system/authorized_keys</code></td>
+<td><code>/etc/dropbear/authorized_keys</code> (non-uci)</td>
+<td><code>GET</code>/<code>POST</code>/<code>PUT</code>/<code>DELETE</code> for SSH key entries. Server-side key-type validation.</td>
+</tr>
+<tr>
+<td><code>system/cron_jobs</code></td>
+<td><code>/etc/crontabs/root</code> (non-uci)</td>
+<td><code>GET</code>/<code>POST</code>/<code>DELETE</code> for one crontab line each. Lines from packages stay as they are. <code>runtime.crond_running</code> reports whether crond runs, and <code>runtime.runs_as_written</code> flags a line crond misreads.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="other-daemons">Other daemons</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Wraps</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dropbear/instances</code></td>
+<td><code>config dropbear</code></td>
+<td>Per-instance SSH config (port, password_auth, root_login, etc.).</td>
+</tr>
+<tr>
+<td><code>uhttpd/instances</code></td>
+<td><code>config uhttpd</code></td>
+<td>Per-instance HTTP server. A PUT or PATCH of <code>main</code> that strips uapi's own <code>ucode_prefix</code> entry, and a DELETE of <code>main</code> while it holds that entry, answer 422 <code>conflict</code> (self-lockout protection). <code>/raw/uhttpd</code> runs no such check.</td>
+</tr>
+<tr>
+<td><code>uhttpd/certs</code></td>
+<td><code>config cert</code></td>
+<td>px5g cert generation params.</td>
+</tr>
+<tr>
+<td><code>unbound/server</code> (singleton)</td>
+<td><code>config unbound</code></td>
+<td>Recursive DNS tuning.</td>
+</tr>
+<tr>
+<td><code>unbound/srv</code> (singleton)</td>
+<td><code>config unbound_srv 'main'</code></td>
+<td>Server-clause directives (<code>interface_bind</code>, <code>interface_outgoing</code>, <code>ip_transparent</code>, plus a raw <code>srv_line</code> passthrough). Requires <code>apk add unbound-uci-ext</code> from the openwrt-iac feed; otherwise the first write returns <code>503 init_script_missing</code>.</td>
+</tr>
+<tr>
+<td><code>unbound/ext</code> (singleton)</td>
+<td><code>config unbound_ext 'main'</code></td>
+<td>Outside-server clauses (<code>forward-zone:</code>, <code>view:</code>, <code>stub:</code>, <code>remote-control:</code>) expressed as a verbatim <code>ext_line</code> list (one entry per rendered line). Same install dependency as <code>unbound/srv</code>.</td>
+</tr>
+<tr>
+<td><code>sqm/queues</code></td>
+<td><code>config queue</code></td>
+<td>Per-device SQM shaping. <code>interface</code> is the device that sqm-scripts shapes, such as <code>eth1</code> or <code>pppoe-wan</code>, as its hotplug matches it. A write takes a kernel device name, 1 to 15 characters without <code>/</code>, <code>:</code> or whitespace, and does not check that the device exists. The options of LuCI's sqm form are fields too, so a PUT of the read keeps them: the three LuCI flags, which sqm-scripts does not read, and the ECN, DSCP, limit, target, qdisc option, link layer and log options that run.sh reads. <code>tc_mtu</code>, <code>tc_tsize</code> and <code>tc_mpu</code> are the uci options <code>tcMTU</code>, <code>tcTSIZE</code> and <code>tcMPU</code>. An absent option reads the value that <code>defaults.sh</code> of sqm-scripts gives it, such as <code>ECN</code> for <code>egress_ecn</code>, which LuCI shows as <code>NOECN</code>.</td>
+</tr>
+<tr>
+<td><code>snmpd/agents</code></td>
+<td><code>config agent</code></td>
+<td>SNMP listen addrs.</td>
+</tr>
+<tr>
+<td><code>snmpd/com2secs</code></td>
+<td><code>config com2sec</code></td>
+<td>community-to-security mapping.</td>
+</tr>
+<tr>
+<td><code>snmpd/groups</code></td>
+<td><code>config group</code></td>
+<td>SNMP group definitions.</td>
+</tr>
+<tr>
+<td><code>snmpd/accesses</code></td>
+<td><code>config access</code></td>
+<td>group-to-view ACLs. A POST or PUT needs <code>group</code>, <code>context</code>, <code>version</code>, <code>level</code>, <code>prefix</code>, <code>read</code>, <code>write</code> and <code>notify</code>, since snmpd.init skips an access without one.</td>
+</tr>
+<tr>
+<td><code>snmpd/system</code> (singleton)</td>
+<td><code>config system</code> (snmpd)</td>
+<td>sys_location, sys_contact, etc. (snake_case in v2).</td>
+</tr>
+<tr>
+<td><code>lldpd/config</code> (singleton)</td>
+<td><code>config lldpd 'config'</code></td>
+<td>LLDP/CDP/etc. toggles.</td>
+</tr>
+<tr>
+<td><code>prometheus_node_exporter_lua/config</code> (singleton)</td>
+<td><code>config prometheus-node-exporter-lua 'main'</code></td>
+<td><code>listen_interface</code> + <code>listen_port</code>.</td>
+</tr>
+<tr>
+<td><code>vnstat/config</code> (singleton)</td>
+<td><code>config vnstat</code></td>
+<td><code>interfaces</code>, the devices vnstat tracks (kernel device names, not uci interface names). The only vnstat option any shipped code reads.</td>
+</tr>
+<tr>
+<td><code>mwan3/globals</code> (singleton)</td>
+<td><code>config globals</code></td>
+<td><code>mmx_mask</code>, <code>logging</code>, <code>loglevel</code>. A write takes the <code>loglevel</code> names that LuCI offers. A stored level that iptables refuses, such as <code>err</code> or <code>warn</code>, blocks every write of the section, and one that iptables takes, such as <code>panic</code> or <code>0x3</code>, is no error.</td>
+</tr>
+<tr>
+<td><code>mwan3/interfaces</code></td>
+<td><code>config interface</code> (mwan3)</td>
+<td>Per-WAN tracking: <code>track_ip</code>, <code>track_method</code>, probe sizing and timing, up/down thresholds, <code>flush_conntrack</code>.</td>
+</tr>
+<tr>
+<td><code>mwan3/members</code></td>
+<td><code>config member</code></td>
+<td>Binds an <code>mwan3/interfaces</code> section to a <code>metric</code> and a <code>weight</code>. A write takes a metric from 1 to 256, since mwan3 leaves a member with a higher one out of its policy, and a stored one above 256 blocks every write of the section.</td>
+</tr>
+<tr>
+<td><code>mwan3/policies</code></td>
+<td><code>config policy</code></td>
+<td><code>use_members</code> plus a <code>last_resort</code> verdict.</td>
+</tr>
+<tr>
+<td><code>mwan3/rules</code></td>
+<td><code>config rule</code> (mwan3)</td>
+<td>Traffic match (family, proto, src/dest ip and port, ipset) routed to a <code>use_policy</code>. A write takes a <code>proto</code> that iptables takes, in any case. With <code>src_port</code> or <code>dest_port</code>, it refuses <code>tcp</code> or <code>udp</code> in another case, whose ports mwan3 drops, and a stored one blocks every write of the section. mwan3 drops the ports of any other proto too, and such a rule is no error. <code>family</code> reads a list as mwan3's <code>config_get</code> joins it, and a value other than <code>ipv4</code> or <code>ipv6</code>, which mwan3 runs for both families, blocks no write.</td>
+</tr>
+<tr>
+<td><code>usteer/config</code> (singleton)</td>
+<td><code>config usteer</code></td>
+<td>Band-steering and roaming thresholds for the usteer daemon.</td>
+</tr>
+</tbody>
+</table>
+<p>When unbound runs, a write to one of the three unbound resources waits 2 s after
+the reload. If unbound stops in that time, the write answers <code>500
+reload_failed_restored</code> and restores the previous config. unbound stops for a
+line of <code>srv_line</code> or <code>ext_line</code> that it cannot parse. Two of these writes at
+the same time answer <code>423 locked</code> for the second, because each restarts unbound,
+and so does one of them beside a <code>dhcp</code> or <code>system</code> write, which can reload
+unbound.</p>
+<h2 id="packages-non-uci">Packages (non-uci)</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Source of truth</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>packages/installed</code></td>
+<td>apk DB</td>
+<td><code>GET</code> lists, <code>POST {name}</code> installs (<code>apk add</code>), <code>DELETE /&lt;name&gt;</code> removes.</td>
+</tr>
+<tr>
+<td><code>packages/feeds</code></td>
+<td><code>/etc/apk/repositories.d/*.list</code></td>
+<td><code>GET</code> lists the feed files and <code>GET /&lt;id&gt;</code> reads one. <code>POST {name, url}</code> creates a feed file + <code>apk update</code>, and <code>DELETE /&lt;id&gt;</code> removes one + <code>apk update</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="anonymous-sections-and-adoption">Anonymous sections and adoption</h2>
+<p>OpenWrt's uci distinguishes <strong>named</strong> sections (stable identifier across
+rewrites) from <strong>anonymous</strong> sections. libuci names an anonymous section at each
+load as <code>cfg</code>, the position of the section in its package in hex, and four hex
+digits of a hash of its type, such as <code>cfg0692bd</code>. When an earlier section is
+deleted, each later anonymous section gets a lower position in its name, so it
+can take the old name of the section before it. Anonymous ids are useless for
+IaC state tracking.</p>
+<p>uapi-managed sections are always named: when a client POSTs to create a
+resource, the server emits a ULID-style identifier (Crockford base32,
+alphanumeric only, fitting uci's <code>[A-Za-z0-9_]</code> charset) and writes it as the
+section's <code>.name</code>. From that point on, the section behaves like any other named
+uci section and its id is stable. Optional one-character type prefix for
+grep-ability (<code>r_01HX...</code> for rules, <code>i_01HX...</code> for interfaces). No <code>uapi_</code>
+namespace prefix; uapi is just another writer to uci.</p>
+<p>Section names are caller-pickable on every CRUD resource (since 2.2.0). <code>POST
+/&lt;resource&gt;</code> accepts an optional <code>id</code> field; if supplied it becomes the section
+name (after charset / length / collision checks). Absent, the server emits the
+ULID.</p>
+<h3 id="pre-existing-anonymous-sections">Pre-existing anonymous sections</h3>
+<p>The common starting state for a router under management is a mix of LuCI-named
+sections, hand-edited sections, and anonymous sections from prior tooling.
+Posture: <strong>read-only by default, explicit adoption.</strong></p>
+<ul>
+<li><code>GET /&lt;resource&gt;</code> returns existing anonymous sections with their libuci name
+  as the id and <code>managed: false</code>. That id changes when an earlier section is
+  deleted, so a client adopts the section first and keeps the new id.</li>
+<li><code>PUT</code>/<code>PATCH</code>/<code>DELETE</code> on a <code>managed: false</code> section returns <code>409
+  unmanaged_resource</code>.</li>
+<li><code>POST /&lt;resource&gt;/&lt;id&gt;/adopt</code> on an <strong>anonymous</strong> section renames it under
+  uapi's ULID scheme and flips it to <code>managed: true</code>. The section is writable
+  like any other after that.</li>
+<li><code>POST /&lt;resource&gt;/&lt;id&gt;/adopt</code> on a <strong>named</strong> section is an idempotent
+  acknowledgement: the section keeps its name and the response carries the
+  existing view with <code>managed: true</code>. The 2.2.0 behavior change replaced the
+  prior rename-to-ULID which broke uci cross-references where sections
+  referenced this one by name (<code>firewall.zones.lan</code> → <code>firewall.rules.src_zone =
+  "lan"</code>).</li>
+</ul>
+<p>Sections that already have a <code>.name</code> (e.g. LuCI-named <code>myrule</code>) are managed
+normally, using their existing <code>.name</code> as the id. uapi does not rewrite names it
+didn't author.</p>
+<p><code>GET</code> on a collection includes both managed and unmanaged sections by default.
+Clients filter via <code>?managed=true</code> / <code>?managed=false</code> when they want one or the
+other. The <code>Link</code> to the next page keeps the filter.
+Another value answers 400 <code>bad_request</code>.</p>
+<p>A page that ends on an unmanaged section gives the cursor <code>c_&lt;id&gt;.&lt;hash&gt;</code>, where
+the hash covers the ETags of the items up to and including that section. When
+one of these items changed, for example because an earlier section was deleted
+and the names moved, the cursor answers 400 <code>invalid_cursor</code> and does not skip
+an item. Read the list again from the first page. A cursor of a managed section
+is <code>c_&lt;id&gt;</code>, and a change before it does not refuse it.</p>
+<h2 id="generic-raw-passthrough">Generic raw passthrough</h2>
+<p><code>/api/v4/raw/&lt;package&gt;/&lt;id&gt;</code> is the escape hatch for any uci config type
+uapi doesn't curate. See <code>docs/raw.md</code> for full semantics, scope
+composition rules, and stability caveat.</p>
+<h2 id="system-endpoints">System endpoints</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Auth</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /healthz</code></td>
+<td>none</td>
+<td><code>{status, version, checks: {ubus, uci, lock_dir, time_sync}}</code>. 503 when any subsystem is degraded.</td>
+</tr>
+<tr>
+<td><code>GET /openapi.json</code></td>
+<td>none</td>
+<td>The OpenAPI 3.1 spec.</td>
+</tr>
+<tr>
+<td><code>GET /schema/&lt;package&gt;/&lt;resource&gt;</code></td>
+<td>none</td>
+<td>One resource's <code>schema_properties</code>. <code>GET /schema</code> lists all keys.</td>
+</tr>
+<tr>
+<td><code>GET /uapi/whoami</code></td>
+<td>any token</td>
+<td>Token introspection: token_id, scopes, source_ip, expires_at, allowed_cidrs, last_used_at, last_used_ip.</td>
+</tr>
+<tr>
+<td><code>GET /uapi/tokens</code>, <code>GET /uapi/tokens/&lt;id&gt;</code>, <code>POST /uapi/tokens</code>, <code>DELETE /uapi/tokens/&lt;id&gt;</code></td>
+<td><code>uapi:tokens:ro</code> for a GET, <code>uapi:tokens:rw</code> for a write (or <code>*</code>)</td>
+<td>HTTP token rotation. POST refuses a scope outside the scope tree with 422, and requires the caller's scopes to cover the requested scopes, equal or narrower.</td>
+</tr>
+<tr>
+<td><code>GET /uapi/metrics</code></td>
+<td><code>uapi:metrics:ro</code> (or <code>*:ro</code>)</td>
+<td>Prometheus 0.0.4 text.</td>
+</tr>
+<tr>
+<td><code>GET /uapi/diagnostics</code></td>
+<td><code>uapi:diagnostics:ro</code></td>
+<td>Version, uptime, loaded resources, the lock files present, <code>state_dirs</code>, <code>limits</code>, <code>interrupted_writes</code>, <code>stopped_instances</code>, <code>recent_errors</code> and <code>management_path</code>. <code>?validate=1</code> adds the validation sweep. <code>docs/operations.md</code> § Diagnostics has the fields.</td>
+</tr>
+<tr>
+<td><code>POST /uapi/services/&lt;name&gt;/recover</code></td>
+<td><code>uapi:services:rw</code>, or <code>rw</code> on a domain whose writes reload the service, such as <code>dhcp:rw</code> for <code>dnsmasq</code></td>
+<td>Stops and starts the service once when procd gave up on one of its instances, and answers <code>{service, recovered}</code>. Stops and starts nothing when procd gave up on none. 500 <code>recover_failed</code> names the instances that are still down. Takes <code>dnsmasq</code>, <code>lldpd</code>, <code>mwan3</code>, <code>odhcpd</code>, <code>prometheus-node-exporter-lua</code>, <code>snmpd</code>, <code>sysntpd</code>, <code>unbound</code> and <code>vnstat</code>. <code>docs/operations.md</code> § Starting again a service that procd gave up on has the details.</td>
+</tr>
+<tr>
+<td><code>POST /uapi/batch</code></td>
+<td>each sub-request scope-checked</td>
+<td>Multi-package all-or-nothing transaction (max 50 ops).</td>
+</tr>
+</tbody>
+</table>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/resources.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/resources.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

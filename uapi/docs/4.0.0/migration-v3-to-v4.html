@@ -1,0 +1,1023 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Migration v3 to v4 - uapi 4.0.0 docs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
+    <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
+       <a href="/uapi/docs/">docs</a> / 4.0.0 / Migration v3 to v4</p>
+  </div>
+</header>
+
+<section>
+  <div class="container docs-body">
+<h1 id="migration-v3-to-v4">Migration v3 to v4</h1>
+<p>What changes between the v3 and v4 majors of the API, and what a client must do.
+The removals and renames were announced in 3.x, apart from <code>openvpn/instances</code>,
+whose section says why. The other changes are listed here, and a section names
+the 3.x release that announced its change when one did. The section "Reads
+that change at the upgrade" lists those reads, and what that does to ETags and
+to a plan made on 3.x.</p>
+<h2 id="4x-needs-openwrt-main-or-the-next-release">4.x needs OpenWrt main or the next release</h2>
+<p>4.x runs on OpenWrt main and on the next OpenWrt release cut from it. It needs a
+netifd that carries <code>e97e36f</code> (committed 2026-07-17), which takes
+<code>disabled 'true'</code> on an interface. OpenWrt 25.12 does not carry it, and 4.x
+does not support 25.12. The 4.x package depends on a netifd that 25.12 does not
+have, so apk does not install 4.x on a 25.12 router, and such a router stays on
+3.5.0. To move to 4.x, move the router to OpenWrt main or to that release first,
+then install 4.x.</p>
+<p>Some sections below say what uapi does on 25.12, where netifd sets up a
+wireguard interface with <code>wireguard.sh</code>. They compare with 3.x on 25.12, or
+describe code that 4.x still holds. They do not mean that 4.x supports 25.12.</p>
+<h2 id="the-mount-moves-to-apiv4">The mount moves to <code>/api/v4</code></h2>
+<p>One installation serves exactly one API major. The package upgrade flips the
+prefix from <code>/api/v3</code> to <code>/api/v4</code> and strips every older prefix, and a
+generated client takes the new base URL from the v4 spec's <code>servers</code> block.
+Change the base URL of every other client, a Prometheus <code>metrics_path</code> and
+each curl script. uapi no longer answers at <code>/api/v3</code> after the upgrade.</p>
+<p>The upgrade writes this change to <code>ucode_prefix</code> of <code>uhttpd.main</code>. So <code>GET
+/uhttpd/instances/main</code> reads <code>/api/v4=/usr/share/uapi/main.uc</code>, and the section
+gets a new ETag. A plan that sets the 3.x entry shows a diff. A write to <code>main</code>
+that keeps the 3.x entry and not the v4 one answers 422 <code>conflict</code> on
+<code>ucode_prefix</code>, because it removes the mount of uapi. Tokens, their scopes and
+every id stay as they are.</p>
+<h2 id="the-special-endpoints-move-under-uapi">The special endpoints move under <code>/uapi/...</code></h2>
+<p>The authenticated special endpoints now live under the domain their scopes
+already named (announced in 3.5.0, #319): <code>/tokens</code> becomes <code>/uapi/tokens</code> (and
+<code>/tokens/&lt;id&gt;</code> becomes <code>/uapi/tokens/&lt;id&gt;</code>), <code>/metrics</code> becomes <code>/uapi/metrics</code>,
+<code>/diagnostics</code> becomes <code>/uapi/diagnostics</code>, <code>/batch</code> becomes <code>/uapi/batch</code>, and
+<code>/auth/whoami</code> becomes <code>/uapi/whoami</code>. The scopes are unchanged (<code>uapi:tokens</code>,
+<code>uapi:metrics</code>, <code>uapi:diagnostics</code>). The unauthenticated trio stays at the top
+level: <code>/healthz</code>, <code>/openapi.json</code>, <code>/schema/*</code>. The old top-level paths answer
+404. The Prometheus <code>path</code> label of the moved endpoints changes with them (e.g.
+<code>path="/uapi/tokens"</code>). A 422 from the token mint counts in
+<code>uapi_validate_errors_total</code> with <code>resource="uapi.tokens"</code>, where 3.x used
+<code>resource="tokens"</code>. The path in the syslog audit and access lines moves too, so
+a token mint logs <code>POST /uapi/tokens</code>. A dashboard, alert or log filter on an
+old path or label stops matching.</p>
+<h2 id="dhcpleases6-merges-into-dhcpleases"><code>dhcp/leases6</code> merges into <code>dhcp/leases</code></h2>
+<p>The <code>/dhcp/leases6</code> endpoint is removed (announced in 3.5.0, #320). <code>GET
+/dhcp/leases</code> still returns the IPv4 leases, and <code>GET /dhcp/leases?family=v6</code>
+returns the IPv6 ones from odhcpd. The entry id is the MAC for v4
+entries and the IP for v6 ones, so <code>GET /dhcp/leases/&lt;ip&gt;?family=v6</code> looks a v6
+entry up. The <code>Link</code> to the next page keeps <code>family</code>. 3.x ignored <code>family</code>, so
+any value listed the IPv4 leases. Now a value other than <code>v4</code> or <code>v6</code> answers
+400 <code>bad_request</code> (announced in 3.5.0, #391).</p>
+<p>An IPv4 entry whose client sent no client id now reads <code>duid</code> null (announced
+in 3.5.0, #392). dnsmasq writes <code>*</code> there, and 3.x read it as the string <code>"*"</code>.</p>
+<p>One schema now describes both families. A v4 entry has <code>mac</code>, and a v6 entry
+has <code>iaid</code>, <code>interface</code>, <code>ia_type</code> and <code>prefix_length</code> instead. A lease that
+does not expire reads <code>expires_at</code> null in both families. dnsmasq writes 0 for
+such a v4 lease, and 3.x read that 0, so a client got epoch 0 for it. LuCI
+reads it as no expiry too (#474). For a client of the v3 <code>dhcp/leases6</code>
+schema, <code>duid</code> can now be <code>null</code>, but a v6 entry always has one, and <code>ia_type</code>
+no longer lists <code>IA_TA</code>, which uapi never returned.</p>
+<p><code>?family=v6</code> reads the leases from <code>ubus call dhcp ipv6leases</code>, as LuCI does on
+OpenWrt main, and no longer from the lease file of odhcpd. The entries are the
+same, because odhcpd writes only its bound leases to the file. The <code>hostname</code> of
+a v6 entry is now the name that the client sent, as odhcpd holds it. In the
+file, odhcpd escapes each byte of a hostname other than a letter, a digit, <code>-</code>,
+<code>_</code> and <code>.</code>, and puts <code>broken\x20</code> before a name that it does not accept. So a
+client that sent <code>foo!</code> read <code>broken\x20foo\x21</code>, and now reads <code>foo!</code>.
+A control byte, the backslash and each byte that is not part of valid UTF-8
+read as <code>\x</code> and two lowercase hex digits, as LuCI shows them, for the v4
+entries too. A hostname is not always a valid DNS name, so check it before you
+copy it into <code>dhcp/hosts</code> (#472).</p>
+<p>The upgrade keeps each stored token and its scopes. A token that holds
+<code>dhcp:leases</code> or <code>*:leases</code>, with either verb, now also reads the IPv6 leases,
+with their DUIDs, host names and addresses. 3.x kept those behind
+<code>dhcp:leases6</code> or <code>*:leases6</code>. A token that holds only <code>dhcp:leases6</code> or
+<code>*:leases6</code> still authenticates, but that scope grants nothing on
+<code>/dhcp/leases</code> now, so <code>?family=v6</code> answers 403 <code>insufficient_scope</code>.
+<code>uapi-token create</code> refuses <code>dhcp:leases6</code> as an unknown path, and <code>POST
+/uapi/tokens</code> answers 422 for it, as the next section says, but both still mint
+<code>*:leases6</code>. A scope on all of <code>dhcp</code>, such as <code>dhcp:ro</code>, reads both families
+before and after the upgrade.</p>
+<p>Before the upgrade, run <code>uapi-token list</code> to find the tokens that hold one of
+these four scopes, <code>dhcp:leases</code>, <code>dhcp:leases6</code>, <code>*:leases</code> or <code>*:leases6</code>,
+with either verb. For a client that reads the IPv6 leases, mint a token on 3.x
+with both <code>dhcp:leases</code> and <code>dhcp:leases6</code>, and revoke the old one. The new
+token reads both families before and after the upgrade. v4 has no scope for the
+IPv4 leases alone, so a client that must not see the IPv6 leases cannot keep
+<code>dhcp:leases</code> or <code>*:leases</code>.</p>
+<h2 id="openvpn-becomes-a-proto-of-networkinterfaces">openvpn becomes a proto of <code>network/interfaces</code></h2>
+<p><code>openvpn/instances</code> is removed (#466). On OpenWrt main, the platform of 4.x,
+the openvpn package runs a tunnel as a netifd protocol. A tunnel is a <code>config
+interface</code> section with <code>option proto 'openvpn'</code> in <code>/etc/config/network</code>,
+which <code>/lib/netifd/proto/openvpn.sh</code> runs. The package has no init script and
+no <code>/etc/config/openvpn</code> there, so <code>openvpn/instances</code> read sections that
+nothing runs, and each write answered 503 <code>init_script_missing</code>. LuCI made the
+same move: luci-proto-openvpn shows a tunnel under Network, Interfaces. No 3.x
+release announced this removal. v3 takes no more releases, and the path cannot
+work on the platform of 4.x.</p>
+<p>A tunnel is now a <code>network/interfaces</code> resource with <code>proto: "openvpn"</code>. It
+needs the <code>openvpn-openssl</code> package, or its <code>openvpn-mbedtls</code> or
+<code>openvpn-wolfssl</code> variant. netifd loads its proto handlers when it starts. After
+an <code>apk add</code> of the package on a running router, netifd does not know proto
+openvpn: <code>ubus call network get_proto_handlers</code> does not list it, <code>ifstatus</code>
+says <code>NO_DEVICE</code>, and uapi reads <code>runtime.effective_proto: "none"</code>. A reboot or
+<code>/etc/init.d/network restart</code> loads the handler.</p>
+<h3 id="what-an-upgraded-router-holds">What an upgraded router holds</h3>
+<p>At the first boot on OpenWrt main, the uci-defaults script
+<code>60_openvpn_migrate.sh</code> of the openvpn package copies each <code>config openvpn</code>
+section of <code>/etc/config/openvpn</code> into <code>/etc/config/network</code>, once. Each copy is
+a <code>config interface</code> of the same name with <code>option proto 'openvpn'</code>. The script
+renames the option <code>proto</code> to <code>ovpnproto</code>, copies every other option as it is,
+and skips a section whose name <code>/etc/config/network</code> already holds. It leaves
+<code>/etc/config/openvpn</code> in place, and nothing reads that file after the upgrade.</p>
+<p>So each 3.x instance reads as <code>GET /network/interfaces/&lt;id&gt;</code> under the same id,
+with a new ETag. Do not create the tunnels again: a POST with an id that
+<code>/etc/config/network</code> holds answers 422 <code>conflict</code>. A client that managed an
+instance takes over the interface of the same id, by an import for Terraform. A
+router that had no <code>/etc/config/openvpn</code> gets no copy.</p>
+<p><strong>Warning: an instance that was off on 3.x runs after the upgrade.</strong> The
+openvpn init script of 25.12 runs a section only when its <code>enable</code> or <code>enabled</code>
+option reads true. Every other section is off, a section with neither option
+too. netifd and the openvpn handler read neither option, and the copy adds no
+<code>disabled</code>. So at the first boot on OpenWrt main, netifd starts every copied
+tunnel, and uapi reads it with <code>disabled: false</code>, <code>auto: true</code> and a <code>runtime</code>
+that is up. Before the upgrade, add <code>option disabled '1'</code> to each instance that
+is off in <code>/etc/config/openvpn</code>: the copy carries it, and the init script of
+25.12 does not read it. Or right after the upgrade, send <code>{"disabled": true}</code>
+to <code>network/interfaces</code> for each such tunnel.</p>
+<p><strong>Warning: an openvpn client can take the default route.</strong> On OpenWrt main,
+openvpn-hotplug adds a default route through the tunnel each time openvpn knows
+a route gateway, also without <code>redirect-gateway</code>, and a server with <code>topology
+subnet</code> always pushes one. With <code>defaultroute</code> unset, which means true, netifd
+then replaces the default route of wan in the main table. When the tunnel goes
+down, netifd removes its route, and the main table has no IPv4 default route
+until wan restarts. A copied 3.x client gets <code>defaultroute</code> unset. Before the
+upgrade, add <code>option defaultroute '0'</code> to each client in <code>/etc/config/openvpn</code>
+that must not carry the default route, or right after the upgrade, send
+<code>{"defaultroute": false}</code> for it. The pushed routes of the server still apply.</p>
+<h3 id="field-map">Field map</h3>
+<p>Each field of <code>openvpn/instances</code> that is not in this table keeps its name, its
+type and its meaning on <code>network/interfaces</code>, and applies to proto openvpn
+only.</p>
+<table>
+<thead>
+<tr>
+<th>3.x <code>openvpn/instances</code></th>
+<th>4.x <code>network/interfaces</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>proto</code></td>
+<td><code>ovpnproto</code>, the uci option that the copy renames it to</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td><code>disabled</code>, inverted, and <code>auto</code>. The copy keeps <code>enabled</code> in uci, which nothing reads. A PATCH keeps it, and a PUT removes it</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>gone: the handler gives openvpn <code>--status /var/run/openvpn.&lt;id&gt;.status</code> itself</td>
+</tr>
+<tr>
+<td><code>comp_lzo</code>, <code>compress</code></td>
+<td>gone: the handler passes them only with <code>allow_deprecated '1'</code>, which uapi does not model</td>
+</tr>
+<tr>
+<td><code>ncp_ciphers</code>, <code>ncp_disable</code></td>
+<td>gone: the handler does not read them. Send the ciphers in <code>data_ciphers</code></td>
+</tr>
+<tr>
+<td>(none)</td>
+<td><code>config</code>, <code>data_ciphers</code>, <code>username</code>, and the write-only <code>password</code> and <code>cert_password</code> with <code>has_password</code> and <code>has_cert_password</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>key</code>, <code>tls_auth</code> and <code>pkcs12</code> stay write-only, with <code>has_key</code>, <code>has_tls_auth</code>
+and <code>has_pkcs12</code>. <code>data_ciphers</code> takes one entry, the cipher names joined by
+colons: the handler gives openvpn each entry as a <code>--data-ciphers</code> of its own,
+and openvpn keeps only the last. Several entries answer 422 <code>conflict</code>, on a
+write and while uci holds them. <code>peerdns</code> and <code>nohostroute</code> of the interface
+apply to openvpn too, and so do the options that netifd reads for every proto,
+such as <code>metric</code> and <code>defaultroute</code>.</p>
+<p>Some reads of the same option differ from 3.x, because netifd hands each option
+to the handler through uci's converter. A boolean reads true for <code>1</code> or <code>true</code>
+only, where 3.x also took <code>yes</code>, <code>on</code> and <code>enabled</code>. An integer such as <code>port</code>
+also reads in hex or octal, so <code>010</code> is 8. An option of <code>remote</code>, <code>push</code>,
+<code>route</code> or <code>data_ciphers</code> that is not a uci list reads as its words, each a
+flag of its own for openvpn. <code>local</code> also takes a host name, as LuCI's form
+does. The booleans carry no <code>default</code> in the spec, because they apply to one
+proto only, as <code>nohostroute</code> of a wireguard interface. A PUT removes each
+option that uapi does not model, such as <code>mode</code> or <code>script_security</code>, and a
+PATCH keeps it.</p>
+<h3 id="tokens-and-scopes">Tokens and scopes</h3>
+<p>The upgrade keeps each stored token and its scopes, and such a token still
+authenticates. <code>/openvpn/instances</code> answers 404 <code>not_found</code> for every token. A
+scope <code>openvpn</code>, <code>openvpn:instances</code> or <code>*:instances</code> grants nothing on the
+tunnels: they need <code>network:interfaces</code> or <code>network</code>, which also cover every
+other interface, the management one included. With <code>raw:openvpn</code>, a scope on
+<code>openvpn</code> still grants <code>/raw/openvpn</code> on the sections that stay in
+<code>/etc/config/openvpn</code>.</p>
+<p><code>uapi-token create</code> refuses <code>openvpn:instances</code> as an unknown path, and <code>POST
+/uapi/tokens</code> answers 422 for it. Both take <code>openvpn</code> only while
+<code>/etc/config/openvpn</code> exists, as a scope on a package outside the tree, and
+<code>*:instances</code>, which now covers <code>dropbear/instances</code> and <code>uhttpd/instances</code>.
+Mint a token with <code>network:interfaces</code> for a client that manages tunnels, and
+revoke its old one.</p>
+<h2 id="the-ppp-login-is-a-field-of-networkinterfaces">The PPP login is a field of <code>network/interfaces</code></h2>
+<p>3.x did not model <code>username</code> and <code>password</code> on proto pppoe, ppp and wwan. A
+PATCH kept both, because a PATCH keeps the options that the resource does not
+model. A PUT removed both, because a PUT removes each option that the resource
+does not emit.</p>
+<p>In 4.x, the login fields of proto openvpn apply to pppoe, ppp and wwan too
+(#469). A read gives <code>username</code> and <code>has_password</code>, and <code>password</code> is
+write-only. A PUT that keeps the proto and leaves <code>password</code> out keeps the
+stored password, and a PUT that leaves <code>username</code> out removes it. A <code>password</code>
+of <code>""</code> removes the stored password.</p>
+<p>A write that changes <code>proto</code> removes <code>username</code> and <code>password</code>, unless it sends
+them, as LuCI's protocol switch does. This holds for a PATCH too, which kept
+them in 3.x. It also holds between pppoe, ppp, wwan and openvpn, and on a switch
+from a proto that uapi does not model, such as qmi. A client that switches a wan
+from pppoe to dhcp and back must send <code>username</code> and <code>password</code> in the write
+that sets pppoe again. The password is write-only, so a client cannot read it
+back: keep it on the client side.</p>
+<h2 id="the-token-mint-refuses-a-scope-that-the-server-does-not-know">The token mint refuses a scope that the server does not know</h2>
+<p><code>POST /uapi/tokens</code> now checks each scope as <code>uapi-token create</code> does
+(announced in 3.5.0, #415). A scope passes when its path is in the scope tree,
+is <code>raw:&lt;package&gt;</code> or <code>*:&lt;package&gt;</code>, or names all of a uci package that exists
+in <code>/etc/config</code>, such as <code>ddns:rw</code> where ddns is installed. Any other scope
+answers 422 <code>validation_failed</code>, with code <code>not_in_enum</code> on its entry of
+<code>scopes</code>, such as <code>scopes[1]</code>:</p>
+<ul>
+<li>a typo, such as <code>firewall:rulez:rw</code> or <code>firewal:rw</code>,</li>
+<li>a scope that v4 removed, such as <code>dhcp:leases6:ro</code> or <code>openvpn:instances:rw</code>,
+  but not <code>*:leases6:ro</code>, which passes as <code>*:&lt;package&gt;</code> and grants nothing on
+  <code>/dhcp/leases</code>,</li>
+<li>a path below a package outside the tree, such as <code>ddns:service:rw</code>,</li>
+<li>a scope on a package that is not installed,</li>
+<li>a malformed scope, such as one without a verb.</li>
+</ul>
+<p>No request of v4 checks such a path, so none of these scopes grants access. A
+scope on a package that is not installed starts to grant access when the
+package is installed, so mint it after the install. 3.x minted each of them,
+and answered 500 <code>internal_error</code> for a malformed one. The check runs before
+the escalation check, so such a scope answers 422 and not 403
+<code>scope_escalation_blocked</code>. A stored token that holds such a scope keeps it and
+still authenticates. <code>docs/tokens.md</code> lists the scope tree.</p>
+<h2 id="runtime-is-required-in-every-resource-response"><code>runtime</code> is required in every resource response</h2>
+<p>Every resource now answers <code>runtime</code>, an object that its response schema
+requires (announced in 3.5.0, #322). The four resources that document their
+<code>runtime</code> fields keep that shape: <code>network/interfaces</code>,
+<code>network/wireguard_peers</code>, <code>wireless/interfaces</code> and <code>dhcp/servers</code>. The others
+declare <code>runtime</code> as an object with a common description, and it holds <code>{}</code>
+when the resource reads no live state. The schemas of the 42 curated CRUD and
+singleton resources also require <code>id</code>. A generated client can now type both
+fields as always present.</p>
+<p>The body of the curated resources and of <code>system/cron_jobs</code> does not change,
+because v3 already returned <code>runtime</code> there. These responses change:</p>
+<ul>
+<li>Each key of <code>system/authorized_keys</code> now holds <code>runtime: {}</code>, in the response
+  of every GET, POST and PUT.</li>
+<li>Each item of the read-only collections <code>dhcp/leases</code> and
+  <code>network/wireguard_kernel_peers</code> now holds <code>runtime: {}</code>. The item is itself
+  the live state, so its <code>runtime</code> stays empty.</li>
+<li><code>packages/installed</code> and <code>packages/feeds</code> already returned <code>runtime: {}</code>, and
+  their schemas now require it.</li>
+</ul>
+<p>A client that refuses an unknown key sees a new one in the first two. <code>/raw</code>
+answers the uci section and no <code>runtime</code>, and the special endpoints under
+<code>/uapi/</code> are not resources.</p>
+<h2 id="unsupported_media_type-leaves-the-error-enum"><code>unsupported_media_type</code> leaves the error enum</h2>
+<p>The <code>ErrorEnvelope.code</code> enum no longer lists <code>unsupported_media_type</code> (415),
+which was reserved and never emitted: uapi never rejects a body on
+<code>Content-Type</code> (announced in 3.5.0, #323). Clients branching on it must drop
+that branch.</p>
+<h2 id="a-write-is-refused-for-any-stored-error-the-section-holds">A write is refused for any stored error the section holds</h2>
+<p>Like LuCI, which validates every visible field of a form at save, a write now
+answers 422 for any error that the section it leaves holds, not only the ones
+that the write adds (announced in 3.4.0, #308). Each check judges that whole
+section, for a PATCH of either kind as for a PUT:</p>
+<ul>
+<li>the schema check: a type, an enum, a bound, a pattern, and the newline rule
+  of #276 below. The schema declares what LuCI and the daemon take, so a value
+  that the platform takes is no error,</li>
+<li>the rules on what a daemon reads, whose errors carry <code>live</code> in the sweep,</li>
+<li>the other rules of each resource, also the ones that 3.x applied only to the
+  fields that a request named, or only in the sweep: the <code>allowed_ips</code> of a
+  disabled <code>network/wireguard_peers</code>, a <code>network/interfaces.listen_port</code> that
+  reads -1, and the one-value rule of <code>network/interfaces</code>. On a proto whose
+  handler reads <code>ipaddr</code>, <code>ip6addr</code> or <code>ip6prefix</code> as one value, such as 6in4,
+  that rule refuses several values of <code>ipaddrs</code>, <code>ip6addrs</code> or <code>ip6prefix</code>, or
+  one value that uci holds as a list. A PATCH that sends one value for the
+  field stores it as an option and fixes the section.</li>
+</ul>
+<p>Before v4 a write that left a stored value alone answered 200, so a broken
+section could still be disabled. Now the fix comes first, or goes through
+<code>/raw</code>. A DELETE does not validate. <code>GET /uapi/diagnostics?validate=1</code>, which
+3.x serves at <code>GET /diagnostics?validate=1</code>, runs the same checks over each
+stored section and lists each error that it finds, so each error that it lists
+now blocks every write of its section. A PATCH that sends a valid value for
+each listed field fixes the section in one write.</p>
+<p>A value that the read cannot show is judged too. fw4 stops while it reads a
+<code>firewall/defaults</code> section with an option that its parser refuses, such as a
+<code>synflood_rate</code> of <code>abc</code>, a <code>drop_invalid</code> of <code>YES</code> or a list, and applies no
+ruleset. A <code>synflood_burst</code> that is a number but no integer, such as <code>16.5</code>,
+is an error too: nft refuses it, so fw4 applies no ruleset while <code>syn_flood</code> is
+on. Such an option reads <code>null</code>, and the sweep names the option and says why.
+A write that sends the field replaces the value, and a null removes it.</p>
+<p>fw4 skips a <code>firewall/zones</code>, <code>firewall/forwardings</code>, <code>firewall/rules</code>,
+<code>firewall/redirects</code> or <code>firewall/nat</code> section with a bool that its parser
+refuses, such as an <code>enabled</code> of <code>YES</code> or a list. Such a bool reads <code>null</code> too,
+and the sweep names it. A PATCH that sends the field replaces the value, and a
+PUT that leaves the field out removes it.</p>
+<p>A value that LuCI or the daemon takes is no error, so it blocks no write and the
+v4 sweep does not list it. Examples are the <code>proto</code> of an interface that uapi
+does not model, such as the <code>6in4</code> that LuCI writes or the <code>qmi</code> that an LTE
+router ships, a list that uci holds for a <code>wireless/interfaces</code> text option, and
+the values that the section on schemas below names. Only a write that changes a
+field to such a value where the request schema refuses it answers 422. A write
+that sends back the value that the section holds passes, so a PUT of a read
+takes it, but a client that checks a body against the <code>*Request</code> schema before
+it sends it must leave such a field out. Two exceptions remain. A request that
+names a proto that uapi does not model answers 422 <code>not_in_enum</code>, also when it
+sends the stored proto, because a PUT would delete the options that the handler
+of that proto reads. So a PUT of the read of such an interface fails, and only a
+PATCH that leaves <code>proto</code> out can change it and keep its proto. As in 3.5.0, a
+PUT of the <code>HELPER</code> target that LuCI writes on a firewall rule answers 422 too,
+because uapi does not model its <code>set_helper</code> option, and a PUT removes it. On
+3.x the sweep is the pre-flight check before the upgrade, with two gaps: it does
+not list what a rule new in v4 refuses, such as a newline in a string that 3.x
+took (#276), and it lists values that v4 takes.</p>
+<h2 id="wirelessinterfaces-gives-one-type-for-each-list-option"><code>wireless/interfaces</code> gives one type for each list option</h2>
+<p><code>device</code> and <code>network</code> read as an array, or null when unset. netifd sets the
+SSID up on each radio, and attaches it to each network, that the option names
+as a list or as words split at any whitespace, and the read gives those words.
+So a stored <code>radio0</code> reads <code>["radio0"]</code>, where 3.x read <code>"radio0"</code>. A request
+may still send a string or a list. A write stores one radio or one network as a
+string, as LuCI and <code>wifi config</code> write it, so a PUT of the read keeps such an
+option as it is.</p>
+<p><code>ssid</code>, <code>nasid</code>, <code>mobility_domain</code> and <code>r1_key_holder</code> read as a string, or
+null when unset, as the 3.x response schema declared. For a list that uci holds,
+3.x read an array that its schema did not declare. v4 reads the text that
+wifi-scripts gives the daemon: the JSON text of the list for <code>ssid</code>, such as
+<code>[ "home", "net" ]</code>, which hostapd broadcasts, and the entries joined by spaces
+for the other three. A request sends only a string, and a PUT of the read stores
+that text as one option. With 802.11r and without both key holder lists,
+wifi-scripts derives their key from the JSON text of a <code>mobility_domain</code> list,
+so such a PUT gives the access point another key. Store <code>mobility_domain</code> in the
+same form on each access point of the domain.</p>
+<p>A client generated from the v3 schema must take an array for <code>device</code> and
+<code>network</code>.</p>
+<h2 id="the-schemas-follow-what-luci-and-the-daemons-take">The schemas follow what LuCI and the daemons take</h2>
+<p>A stored value that LuCI or the daemon takes must not block a write, so the
+response schema of each field declares what the platform takes. 3.5.0 already
+widened most of these schemas (#410), for example <code>network/rules.priority</code> up
+to 2147483647, <code>dhcp/servers.leasetime</code> with <code>infinite</code> and <code>deprecated</code>,
+<code>mwan3/rules.proto</code> as any protocol name, the bounds of the <code>mwan3/interfaces</code>
+timers, an <code>unbound/server.ttl_min</code> above 86400, and a
+<code>wireless/interfaces.encryption</code> of <code>psk3</code>, <code>psk3-mixed</code> or <code>wpa-mixed</code>. Over
+3.5.0, v4 widens the response schema of the <code>dhcp/leases</code> items and of
+<code>wireless/interfaces.mode</code>, which can read null, and declares an array for
+<code>wireless/interfaces.device</code> and <code>network</code>. Their sections say more, and
+<code>build/openapi.json</code> lists each field. A
+request can stay narrower, through the <code>*Request</code> schema. As in 3.5.0, the
+server checks it against the fields that a request names, other than a value
+that the section holds. In v4, a <code>dhcp/servers.leasetime</code> with a year suffix,
+which stops dnsmasq, is refused on write, and so is a <code>network/bridge_vlans</code>
+port name longer than 15 characters, which no Linux interface has. The request
+schema of <code>network/rules.ipproto</code> takes only an integer from 1 to 255, as LuCI
+writes it, where 3.x declared an integer or a string: a read still gives a
+stored name such as <code>tcp</code>, and a write may send it back unchanged.</p>
+<p>The rules on what netifd and wifi-scripts read judge only what they refuse or
+read as another value. A <code>network/rules</code> form that netifd installs as it reads,
+such as an <code>ipproto</code> of <code>tcp</code> or <code>06</code>, a <code>uidrange</code> of <code>1000-1005x</code> or a
+<code>suppress_prefixlength</code> above 32, and a <code>wireless/devices.txpower</code> above 30, a
+<code>channel</code> above 233 or a <code>radio</code> below 0, with which the radio comes up, block
+no write. Nor does a <code>wireless/interfaces.mode</code> of <code>wds</code>, which blocked enabling
+the SSID or its radio in 3.x: mac80211.sh skips it as it skips <code>ahdemo</code> and a
+section without a mode, and a write that sends it is still refused. An <code>ipproto</code>
+above 255, or a port or uid that netifd wraps, is an error: the kernel gets
+another value. A <code>mwan3/globals.mmx_mask</code> that is not a 32-bit number in hex,
+decimal or octal, such as <code>08</code>, blocks every write, since mwan3, iptables and
+<code>ip</code> cannot use it. A write that changes the encryption of an SSID to an EAP
+mode needs a key, and one that sends back the stored mode does not.</p>
+<p>v4 adds three more refusals. A <code>mwan3/rules</code> section with
+<code>src_port</code> or <code>dest_port</code> and a <code>proto</code> of <code>tcp</code> or <code>udp</code> in another case, such
+as <code>TCP</code>, answers 422 <code>conflict</code> on <code>proto</code>, because mwan3 then drops the ports
+and the rule matches every port. A <code>firewall/zones.name</code> that starts with a
+digit or a dash, such as <code>1wan</code>, answers 422 <code>invalid_format</code>, because fw4 skips
+such a zone. A stored one of these two blocks every write of its section. A
+<code>mwan3/rules.proto</code> of <code>dccp</code> or <code>ipcomp</code> answers 422 <code>invalid_format</code>, because
+iptables 1.8.10 and musl do not know them, and mwan3 then loads none of the
+rules of the family. A stored one reads as it is. 3.x took all three. A
+<code>mwan3/rules.proto</code> name in any case, <code>mobility-header</code> and an octal number
+with more leading zeros, such as <code>000017</code>, pass as in 3.x.</p>
+<p>Some reads now give the value as the daemon parses it: a firewall policy,
+target, <code>reflection_src</code> or family as fw4 reads it, an option of several words
+as its words, and a numeric route type as its name. The table in "Reads that
+change at the upgrade" lists them.</p>
+<h2 id="boolean-reads-follow-the-reader-of-their-daemon">Boolean reads follow the reader of their daemon</h2>
+<p>The readers whose daemon goes through libvalidate's <code>:bool:</code> or
+<code>config_get_bool</code> now read the ten spellings of that reader (announced in
+3.4.0, #310): <code>system.log_remote</code>, <code>system/timeservers</code> (<code>enabled</code>,
+<code>enable_server</code>, <code>use_dhcp</code>), the <code>usteer/config</code> booleans (<code>syslog</code>, <code>ipv6</code>,
+<code>assoc_steering</code>) and the <code>dropbear/instances</code> flags (<code>password_auth</code>,
+<code>root_password_auth</code>, <code>root_login</code>, <code>gateway_ports</code>). <code>enabled</code> now reads
+<code>true</code> and <code>disabled</code> reads <code>false</code> there, where v3 answered the default.
+fw4's <code>parse_bool</code> keeps its eight spellings. Evidence: ubox <code>6f78fa4</code>, pinned
+in <code>docs/ucode-quirks.md</code> (#312).</p>
+<p>Two defaults follow the daemon too. The 3.4.0 announcement named only the
+spellings, and 3.5.0 announced these defaults (#369). An absent <code>log_remote</code>
+reads <code>true</code>, as log.init takes it (<code>log_remote:bool:1</code>). A stock
+<code>/etc/config/system</code> holds no <code>log_remote</code>, so this read changes on a stock
+router. An absent usteer <code>syslog</code> reads <code>false</code>, as usteer's <code>set_config</code> resets
+it.</p>
+<p>Where one of these reads changed, a plan that holds the 3.x read now writes it,
+and the daemon then does what that read said. With <code>log_ip</code> set and no
+<code>log_remote</code>, log.init sends the log to <code>log_ip</code>, so a plan that holds
+<code>log_remote = false</code> stops it. A dropbear flag stored as <code>disabled</code> read <code>true</code>
+in 3.x, so a plan that holds <code>true</code> turns password or root login back on.</p>
+<p><code>sqm/queues.enabled</code> reads <code>true</code> only for a value that sqm-scripts takes as on:
+its <code>run-openwrt.sh</code> starts a queue only when <code>[ "$(config_get "$section"
+enabled)" -eq 1 ]</code> holds. An absent <code>enabled</code>, or <code>yes</code>, <code>on</code> or <code>true</code> written
+by hand, read <code>true</code> in v3 for a queue that sqm left off, and now reads <code>false</code>
+(announced in 3.5.0, #372). A queue that LuCI made holds <code>1</code> or <code>0</code> and reads
+the same. A plan that sets <code>enabled = true</code> on such a queue now writes <code>1</code>,
+which starts SQM there. A value such as <code>01</code>, <code>+1</code> or <code>1</code> reads <code>true</code>, because
+the shell test takes it as 1.</p>
+<p><code>sqm/queues.interface</code> is the device that sqm-scripts shapes, such as <code>eth1</code> or
+<code>pppoe-wan</code>, as its hotplug matches it. 3.x took only the name of a uci network
+interface, such as <code>wan</code>, which sqm never matches unless a device has that
+name, and refused the <code>eth1</code> of the stock queue. A write now takes a kernel
+device name, 1 to 15 characters without <code>/</code>, <code>:</code> or whitespace, and does not
+check that the device exists. A uci interface name longer than 15 characters
+answers 422. Set the field to the device of the interface, which
+<code>runtime.l3_device</code> of <code>network/interfaces</code> gives (#477).</p>
+<p><code>sqm/queues</code> models the options that LuCI's sqm form writes, so a PUT of the
+read keeps them, where 3.x removed them (#480). An absent option of the queue
+now reads the value that sqm-scripts gives it: <code>download</code> 14698, <code>upload</code> 2302,
+<code>qdisc</code> <code>fq_codel</code>, <code>linklayer</code> <code>none</code> and <code>overhead</code> 0, where 3.x read null. A
+queue that LuCI made holds these options and reads the same.</p>
+<h2 id="a-wirelessinterfaces-section-with-no-mode-reads-null">A <code>wireless/interfaces</code> section with no <code>mode</code> reads <code>null</code></h2>
+<p>wifi-scripts sets up nothing for a section without a <code>mode</code> (mac80211.sh skips
+an absent mode as it skips an unknown one), so the read now answers <code>null</code>
+instead of <code>"ap"</code> (announced in 3.4.0, #307). The write side changes the same
+way (announced in 3.5.0, #376): a <code>null</code> mode is accepted and removes the
+option, leaving a section that sets up nothing. A create or PUT that sends no
+mode stores none, so a client that creates an access point must send
+<code>mode: "ap"</code>.</p>
+<p>A plan that holds <code>mode = "ap"</code> from a 3.x read of such a section now writes
+<code>ap</code>, and wifi-scripts then sets up an access point that did not run before.
+With no <code>encryption</code> stored, that access point is open. Before you apply, set
+<code>mode</code> to <code>null</code> to keep the SSID down, or set its <code>encryption</code> and <code>key</code>.</p>
+<p>For Terraform, a plan refreshes first, so a <code>mode</code> that the configuration does
+not set reads null, and the apply writes nothing for it. Only a configuration
+that sets <code>mode = "ap"</code> writes it. Remove <code>mode</code> from such a configuration to
+keep the SSID down.</p>
+<p>A section without a mode no longer blocks a write that turns its radio on, and
+the validation sweep marks its errors <code>live: false</code>. A write to it is still
+checked as mode <code>ap</code>.</p>
+<h2 id="mwan3interfacesfamily-reads-ipv4-when-unset"><code>mwan3/interfaces.family</code> reads <code>ipv4</code> when unset</h2>
+<p><code>mwan3.sh</code> and <code>mwan3track</code> both default an unset <code>family</code> to <code>ipv4</code>, so the
+read now answers <code>"ipv4"</code> instead of <code>null</code> for a section that stores none
+(announced in 3.4.0, #306). An empty <code>family</code> reads <code>ipv4</code> too, and a list
+reads as the string that <code>config_get</code> makes of it. The response declares
+<code>family</code> as a string that every read holds. A plan that holds <code>null</code> there sees
+<code>ipv4</code> at each read, so make it hold <code>ipv4</code>. mwan3 does the same either way.</p>
+<p><code>family</code> is no longer in the <code>required</code> list of the request schema, and that
+schema no longer declares null. Only the merge-patch body declares null. To
+remove the option, leave <code>family</code> out of a POST or a PUT, or send null in a
+merge patch. The server also takes a null in a POST or a PUT, the same as a
+field that the request leaves out. After the option is removed, the read
+answers <code>ipv4</code> again.</p>
+<h2 id="two-mwan3-values-that-mwan3-does-not-run-answer-422">Two mwan3 values that mwan3 does not run answer 422</h2>
+<p>mwan3 passes <code>mwan3/globals.loglevel</code> to iptables as the level of its LOG
+rules, and iptables refuses <code>err</code> and <code>warn</code>. mwan3 then loads none of its rules
+once one of them logs. mwan3 also leaves a <code>mwan3/members</code> section with a
+<code>metric</code> above 256 out of its policy. A write of such a value now answers 422,
+<code>not_in_enum</code> for the log level and <code>out_of_range</code> for the metric (announced in
+3.5.0, #407). Send <code>error</code> or <code>warning</code>, and a metric from 1 to 256, as LuCI
+does. A stored one blocks every write of its section until a write replaces
+it, and the read still gives it. <code>GET /uapi/diagnostics?validate=1</code> lists it,
+and marks the log level <code>live</code> only while <code>logging</code> is on. The same holds for
+any other level that iptables refuses, such as <code>8</code> or <code>3 x</code>. A stored level that
+iptables takes is no error, such as <code>panic</code>, or a number from 0 to 7 in the
+base that strtoul reads, such as <code>3</code> or <code>0x3</code>. The read gives it and a write can
+send it back, but a write that sends it anew answers 422, since a request takes
+the names that LuCI offers. The response schema of <code>loglevel</code> declares a string
+with no enum.</p>
+<h2 id="two-firewall-reads-say-what-fw4-applies">Two firewall reads say what fw4 applies</h2>
+<p>fw4 gives a <code>firewall/zones</code> section without <code>input</code>, <code>output_policy</code> or
+<code>forward</code> the policy of <code>firewall/defaults</code>, and DROP when that section has
+none. 3.x read <code>REJECT</code> for it. v4 reads <code>null</code> (announced in 3.5.0, #408), and
+the schemas declare null and no <code>default</code> for the three fields.
+<code>firewall/defaults</code> gives the policy that fw4 applies. A write of the read, or a
+null, stores no policy, so the zone keeps the policy of <code>firewall/defaults</code>. A
+plan that holds <code>REJECT</code> from a 3.x read now writes it, and the zone then
+rejects where it took the policy of <code>firewall/defaults</code> before. Set the field to
+null in the plan to keep that policy. This differs from the 3.5.0 notice, which
+said that v4 reads what fw4 applies: fw4 applies the policy that
+<code>firewall/defaults</code> holds, so the zone reads null, and <code>firewall/defaults</code> reads
+the policy.</p>
+<p>The three fields carry <code>x-uapi-clear-on-omit</code>. A PUT that leaves one out removes
+the option, as in 3.x, and the zone takes the policy of <code>firewall/defaults</code>
+again. A PATCH that leaves one out keeps it.</p>
+<p>For Terraform, a plan refreshes first, so a policy that the zone does not set
+reads null, and the apply writes nothing for it. Only a policy that the
+configuration sets writes its value, so a Terraform user edits nothing for this
+change of the read. To put a zone back on the policy of <code>firewall/defaults</code>,
+remove the attribute from the configuration. A provider that reads the flag
+also removes a policy that the zone stores and the configuration does not set,
+so set each policy that the zone must keep.</p>
+<p>fw4 takes a <code>firewall/defaults.synflood_rate</code> with a unit, such as
+<code>25/minute</code>, or a prefix of the unit, such as <code>25/m</code>. 3.x read null for it. v4
+reads the rate as fw4 applies it, always with the whole unit, so <code>25/m</code> reads
+<code>25/minute</code> (announced in 3.5.0, #408).</p>
+<p>A stored rate without a unit, such as <code>25</code>, read as the integer 25 in 3.x. v4
+reads it as the string <code>25/second</code>, and the response declares a string. Every
+rate reads as a string so that a Terraform client can type the field, because
+Terraform has no type that is an integer or a string. A client generated from
+the schema must take a string there.</p>
+<p>A write takes a string with a rate of 1 or more and the whole unit, <code>second</code>,
+<code>minute</code>, <code>hour</code> or <code>day</code>, such as <code>25/minute</code>. It refuses a prefix of the unit,
+such as <code>25/m</code>, and the string <code>"25"</code>, with 422 <code>invalid_format</code>. A write also
+takes an integer of 1 or more, which is a rate per second.</p>
+<p>The kernel refuses a limit whose rate plus burst overflows 64 bits, such as a
+rate of <code>18446744073709551615</code>. It also refuses a slow rate with a large burst,
+such as <code>1/minute</code> with a burst of 4294967295, when the nanoseconds per packet
+times the burst overflow 64 bits. fw4 then applies no ruleset while <code>syn_flood</code>
+is on. v4 refuses such a write with 422 <code>out_of_range</code> on <code>synflood_rate</code>. A
+stored one is an error of the section that blocks every write that does not
+fix it, and the sweep marks it live while <code>syn_flood</code> is on. 3.x took such a
+write.</p>
+<p>A <code>firewall/defaults.synflood_burst</code> reads as fw4 parses it, so <code>0x10</code> reads 16
+and <code>1e3</code> reads 1000, where 3.x read null.</p>
+<p>LuCI's zones form writes <code>synflood_protect</code> and removes <code>syn_flood</code>. fw4 applies
+<code>synflood_protect</code>, and reads <code>syn_flood</code> only when uci holds no
+<code>synflood_protect</code>. 3.x read only <code>syn_flood</code>, so after LuCI turned the
+protection on, <code>firewall/defaults.syn_flood</code> read <code>false</code> while fw4 protected.
+v4 reads the value that fw4 applies. A plan that holds <code>false</code> from a 3.x read
+of such a section shows a diff, and its apply turns the protection off. Set it
+to <code>true</code> in the plan to keep the protection.</p>
+<p>A write of true now stores <code>synflood_protect '1'</code> and removes <code>syn_flood</code>, as
+LuCI does. A write of false removes <code>synflood_protect</code> and stores <code>syn_flood
+'0'</code>, where LuCI removes both. A null removes both. In 3.x, a write over a
+stored <code>synflood_protect</code> changed only <code>syn_flood</code>, so it answered 200 and fw4
+kept the value of <code>synflood_protect</code>. A <code>synflood_protect</code> that fw4 refuses,
+such as <code>maybe</code> or a list, is an error of <code>syn_flood</code> that blocks every write
+of the section that does not replace it.</p>
+<p>fw4's parser refuses a bool of <code>firewall/defaults</code> that holds a list or a
+value other than <code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code>, <code>0</code>, <code>off</code>, <code>false</code> or <code>no</code>, such
+as a <code>drop_invalid</code> of <code>YES</code>. fw4 then applies no ruleset, and the value is an
+error of the section that blocks every write that does not replace it. 3.x
+read such a bool as <code>false</code>. v4 reads <code>null</code>, and the schemas of <code>syn_flood</code>,
+<code>drop_invalid</code>, <code>tcp_syncookies</code>, <code>flow_offloading</code> and <code>flow_offloading_hw</code>
+admit null. So a plan that holds <code>true</code> or <code>false</code> shows a diff, and its apply
+sends the field and fixes the section. With a read of <code>false</code>, a plan that
+holds <code>false</code> would never send the field, and each other write would answer
+422. fw4 parses both <code>synflood_protect</code> and <code>syn_flood</code>, so <code>syn_flood</code> reads
+<code>null</code> when either holds such a value, and a write of <code>syn_flood</code> then replaces
+both. An unset bool reads <code>false</code>, as in 3.x.</p>
+<p>fw4 refuses the same values in a bool of a zone, a forwarding, a rule, a
+redirect or a nat rule, and skips that section with the warning "skipped due
+to invalid options". 3.x read such a bool as its default, so a rule with
+<code>enabled 'YES'</code> read <code>true</code> while fw4 skipped it, and the 3.x sweep did not
+list it. v4 reads <code>null</code> for <code>masq</code> and <code>mtu_fix</code> of <code>firewall/zones</code>, for
+<code>enabled</code> of <code>firewall/forwardings</code>, <code>firewall/rules</code>, <code>firewall/redirects</code> and
+<code>firewall/nat</code>, and for <code>reflection</code> of <code>firewall/redirects</code>, and their schemas
+admit null. The value is an error of the section, so the sweep lists it and a
+PATCH that does not send the field answers 422. A write that sends <code>true</code> or
+<code>false</code> fixes the section, and a null removes the option. A PUT that leaves
+the field out removes it too. A plan that holds <code>true</code> or <code>false</code> shows a
+diff, and its apply sends the field and fixes the section. An unset bool reads
+as in 3.x: <code>false</code> for <code>masq</code> and <code>mtu_fix</code>, <code>true</code> for <code>enabled</code>, and <code>null</code>
+for <code>reflection</code>.</p>
+<h2 id="curated-string-fields-refuse-newlines-and-carriage-returns">Curated string fields refuse newlines and carriage returns</h2>
+<p>One check in the type gate now refuses <code>\n</code> and <code>\r</code> in every curated string on
+write (announced in 3.4.0, #276), so the refusal no longer depends on the
+per-field <code>LINE_RE</code>/<code>ONE_LINE_RE</code> patterns, which had disagreed about <code>\r</code>. The
+only opt-out is <code>system.notes</code>, which holds several lines on purpose, as its
+description in the spec says. Free-text fields such as descriptions that no
+daemon reads as one line are refused too. That is the announced breaking part. A
+stored one blocks every write of its section, as the #308 section above says.
+Per-field <code>pattern</code>s keep their word, quote and glob rules.</p>
+<h2 id="networkroutestable-and-networkruleslookup-accept-a-table-name-on-write"><code>network/routes.table</code> and <code>network/rules.lookup</code> accept a table name on write</h2>
+<p>The request type of both fields is now a union of integer and string (announced
+in 3.4.0, #240). A name is resolved exactly as netifd resolves it (number, then
+<code>default</code>/<code>main</code>/<code>local</code>, then <code>/etc/iproute2/rt_tables</code>) and stored as its id.
+A name that does not resolve answers 422 <code>invalid_format</code>, and an id of 0
+answers 422 <code>out_of_range</code>. The read still answers the id, so a plan stays
+stable when <code>rt_tables</code> changes, and a name stored by hand or by LuCI still
+reads as its id. The response schema keeps the integer type of 3.x.</p>
+<h2 id="networkinterfacesip6prefix-is-array-only-on-write"><code>network/interfaces.ip6prefix</code> is array-only on write</h2>
+<p>A space-separated string on write is refused with 422 <code>invalid_type</code> (announced
+since 3.2.0, removed in v4, #241). Send an array, which is also what the read
+has returned since 3.2.0. A one-element array is still stored as a scalar, which
+netifd, 6rd, map and 464xlat read the same way, so the stored form does not
+change.</p>
+<h2 id="wireguard-peer-writes-on-openwrt-main">WireGuard peer writes on OpenWrt main</h2>
+<p>3.x runs on OpenWrt 25.12, and 4.x on OpenWrt main and the next release. On
+main, netifd sets up a wireguard interface with a ucode proto handler,
+<code>/lib/netifd/proto/wireguard.uc</code>, in place of <code>wireguard.sh</code>. That changes what
+a write to <code>network/wireguard_peers</code> does there:</p>
+<ul>
+<li>netifd restarts the interface on every peer change. So each peer write
+  interrupts the tunnel for every peer of the interface, not only for the peer
+  that it changes.</li>
+<li>The restart sets the peers from uci with one <code>wg syncconf</code>, all of them or
+  none. So the kernel state of a peer write lands with the restart, after the
+  commit. uapi waits up to 8 s for the restart to end, then applies the peer and
+  answers, so <code>X-Kernel-Status: ok</code> reports the interface after the restart.</li>
+<li>A restart that does not end in 8 s fails a write that sets a peer with a
+  restore: 500 <code>reload_failed_restored</code>, or <code>reload_failed_unrecovered</code> when
+  the restore fails too. A write whose operations on the interface only remove
+  peers, a DELETE or a write that disables them, keeps its commit and skips the
+  interface instead, because the next setup reads uci, which no longer holds
+  them. Since openwrt ecd9120f04, the handler leaves out a key, a preshared
+  key, an endpoint or a keepalive that wg would refuse. An allowed IP that wg
+  refuses still keeps the interface down, and so does an endpoint host of
+  digits and dots that inet_aton does not read, which a write refuses, as the
+  next section says. A write to an interface that another stored peer keeps
+  down answers <code>X-Kernel-Status: blocked</code>, as the section after it says.</li>
+</ul>
+<p>On 25.12, <code>wireguard.sh</code> restarts nothing on a peer change, and uapi applies
+the peer with <code>wg set</code>, which leaves the other peers up. On main, the peer
+changes of one interface can go in one <code>POST /uapi/batch</code>. A batch commits its
+writes once and reloads netifd once, so netifd gets one change of the interface
+to restart it for, not one for each peer.
+<code>docs/errors.md</code> (<code>X-Kernel-Status</code>) and the kernel apply in
+<code>docs/architecture.md</code> give the details.</p>
+<h2 id="a-wireguard-endpoint-that-does-not-resolve-follows-the-platform">A WireGuard endpoint that does not resolve follows the platform</h2>
+<p>3.x committed a peer whose <code>endpoint_host</code> does not resolve. On an up interface
+<code>wg set</code> refused it, and the restore answered 500 <code>reload_failed_restored</code>. On
+an interface that was down, or that netifd did not know, 3.x answered 200
+<code>X-Kernel-Status: skipped</code> and stored the host. v4 answers as the platform
+treats such a host.</p>
+<p>On 25.12, wireguard.sh gives the endpoint to wg, which refuses the config of the
+whole interface at its next start for a name that does not exist. A write that
+sends such a name for an enabled peer with a key answers 422 <code>conflict</code> on
+<code>endpoint_host</code>, before its commit: a name for which busybox's nslookup gets
+NXDOMAIN, or a reply with no address, such as one that holds only a CNAME. This
+refuses a payload that 3.x stored on a down interface, which then did not come
+up again. A lookup that fails for a time, as on a timeout or a SERVFAIL, is not
+refused, because wg retries the name and the interface comes up once it
+resolves. A host that inet_aton reads as an IPv4 address, such as
+<code>192.168.1.01</code>, <code>10.1</code> or <code>0x0a000001</code>, asks no resolver, because wg reads it
+as an address too.</p>
+<p>On both platforms, the proto handler gives wg an IPv6 address as it stands, and
+musl's getaddrinfo reads its %zone. It takes digits up to 4294967295 on any
+address, and the name of an interface only on a link-local or multicast
+link-local address. wg refuses the config of the whole interface for any other
+zone. A write now refuses a zone that musl refuses on every router, such as
+<code>2001:db8::1%x</code>, with 422 <code>invalid_format</code> on <code>endpoint_host</code>, on a disabled
+peer too, and a stored one blocks every write of its peer. A write that sends a
+zone that names no interface of the router, such as <code>fe80::1%nosuchdev</code>, for an
+enabled peer with a key, answers 422 <code>conflict</code>. 3.x took both. On an up
+interface, the write answered 500 after the restore. A down interface did not
+come up at its next start.</p>
+<p>On OpenWrt main, the ucode proto handler gives wg a host of only digits and dots
+as it stands. wg refuses the config of the whole interface for one that
+inet_aton does not read, such as <code>10.0.0.256</code> or <code>1.2.3.4.5</code>. A write refuses
+such a host with 422 <code>invalid_format</code> on <code>endpoint_host</code>, on a disabled peer
+too, and a stored one blocks every write of its peer until a write replaces it.
+This refuses a payload that 3.x stored on a down interface.</p>
+<p>The handler leaves out the endpoint of any other host for which busybox's
+nslookup prints no address, and keeps the peer. The write answers 200, sets the
+peer without the endpoint, and says so with the new <code>X-Kernel-Status: omitted</code>.
+A read then shows <code>runtime.endpoint</code> null beside the stored <code>endpoint_host</code>. A
+client that branches on the values of <code>X-Kernel-Status</code> sees <code>omitted</code> there, as
+it can see a new error code.</p>
+<p>The handler also matches a key as uci holds it. It skips a peer whose stored
+<code>public_key</code> holds whitespace or a <code>#</code> comment, with its routes, and leaves out
+such a <code>preshared_key</code>, or one that uci holds as a list, where wg reads both
+under wireguard.sh. On OpenWrt main, such a key is now an error, so it blocks
+every write of its peer, as the stored errors above do. So no write installs
+the routes of such a peer, where 3.x did. LuCI refuses such a key too.</p>
+<h2 id="a-write-to-a-wireguard-interface-that-a-stored-peer-keeps-down-answers-blocked">A write to a WireGuard interface that a stored peer keeps down answers <code>blocked</code></h2>
+<p>Both proto handlers give wg every enabled peer of an interface at once, and wg
+refuses the config of the whole interface for one value that it cannot use,
+such as an allowed IP that it cannot parse. A write refuses such a value when
+it sends it, but LuCI or a shell can store one, and an IPv6 link-local
+endpoint whose %zone names an interface keeps the interface down once that
+interface goes away. The interface then does not come up.</p>
+<p>3.x answered a write that switched an enabled interface to wireguard, enabled
+a wireguard interface, or created one under the name of stored peers with 422
+<code>conflict</code> on <code>proto</code> or <code>disabled</code> for such a peer. v4 keeps the commit of
+such a write, as LuCI saves it, and answers 200 with the new value
+<code>X-Kernel-Status: blocked</code> and the new header <code>X-Kernel-Blocked</code>, which names
+each such peer as <code>&lt;interface&gt;/&lt;id&gt;</code>. Any other write of <code>network/interfaces</code>
+that leaves a wireguard interface enabled answers the same, because netifd
+restarts the interface, where 3.x answered <code>no_kernel</code>. A client that relied
+on the 422 to keep the interface off now finds it enabled and down. To get it
+up, fix, disable or delete each peer that <code>X-Kernel-Blocked</code> names.</p>
+<p>A write of a peer of such an interface keeps its commit too, with no restore,
+and answers <code>blocked</code> with the header. On 25.12, 3.x answered
+<code>X-Kernel-Status: skipped</code> for it when the interface was down, and v4 names the
+peer. wireguard.sh restarts nothing on a peer change, so an interface that is
+still up takes the write there, <code>X-Kernel-Applied</code> names it beside <code>blocked</code>,
+and the interface does not come up at its next start. On OpenWrt main, such a
+write answered 500 <code>reload_failed_restored</code> when netifd read the restart as
+pending after 8 s, and undid the write, a DELETE included. It now answers
+<code>blocked</code> with no wait. A write that fixes, disables or deletes the peer finds
+none and takes the usual path. A batch that also applies another interface
+answers <code>partial</code>, with <code>X-Kernel-Blocked</code> beside it.</p>
+<p><code>GET /uapi/diagnostics?validate=1</code> lists each such peer with code <code>conflict</code>
+on the field <code>""</code>, and a message that says that it keeps the interface down.
+A client that branches on the values of <code>X-Kernel-Status</code> sees <code>blocked</code> as it
+can see a new error code. No ETag, token or default changes at the upgrade.</p>
+<h2 id="four-request-headers-take-effect">Four request headers take effect</h2>
+<p>3.x read <code>If-Match</code>, <code>If-None-Match</code>, <code>Idempotency-Key</code> and <code>X-Request-Id</code> only
+from their query forms, <code>?if_match=</code>, <code>?if_none_match=</code>, <code>?idempotency_key=</code> and
+<code>?request_id=</code>, and ignored the headers. v4 reads the headers too. A header
+that is not empty wins over its query form, and an <code>X-Request-Id</code> header only
+when it matches <code>^[A-Za-z0-9_-]{8,128}$</code>. A request that sends one of the
+headers now gets what it asks for, where 3.x answered as if it had no header:</p>
+<ul>
+<li>A PUT, PATCH or DELETE with a stale <code>If-Match</code>, or with an <code>If-None-Match</code>
+  that matches, such as <code>If-None-Match: *</code> on a section that exists, answers
+  412 and writes nothing.</li>
+<li>A GET of one item or of a singleton with an <code>If-None-Match</code> that matches its
+  ETag answers 304 with no body.</li>
+<li>A POST that repeats an <code>Idempotency-Key</code> replays the first response, or
+  answers 409 <code>idempotency_key_conflict</code> for another body, and creates no
+  second section.</li>
+<li>A POST with an <code>Idempotency-Key</code> outside
+  <code>^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$</code> answers 400 <code>bad_request</code>, as
+  <code>?idempotency_key=</code> does in 3.x. A key in base64 is the usual case, because
+  <code>+</code>, <code>/</code> and <code>=</code> are outside the pattern.</li>
+<li>A valid <code>X-Request-Id</code> is echoed in the <code>X-Request-Id</code> response header, in
+  the <code>request_id</code> of an error body and in the log lines of the request, in
+  place of a new ULID.</li>
+</ul>
+<p>A client that sends only the query forms sees no change.</p>
+<h2 id="reads-that-change-at-the-upgrade">Reads that change at the upgrade</h2>
+<p>Apart from the mount in <code>uhttpd.main</code>, the upgrade keeps <code>/etc/config</code>, the
+token store and every id as they are. Of the stored scopes, only <code>dhcp:leases</code>,
+<code>dhcp:leases6</code>, <code>*:leases</code> and <code>*:leases6</code> change what they grant, as the
+<code>dhcp/leases</code> section says, and the scopes on <code>openvpn</code> and <code>*:instances</code> no
+longer reach a tunnel, as the openvpn section says. Some reads now answer
+another value for the same stored option, to follow what the daemon does:</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Field</th>
+<th>The read changes when the option is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system</code></td>
+<td><code>log_remote</code></td>
+<td>absent, <code>enabled</code> or an unknown word</td>
+</tr>
+<tr>
+<td><code>system/timeservers</code></td>
+<td><code>enabled</code>, <code>use_dhcp</code></td>
+<td><code>disabled</code></td>
+</tr>
+<tr>
+<td><code>system/timeservers</code></td>
+<td><code>enable_server</code></td>
+<td><code>enabled</code></td>
+</tr>
+<tr>
+<td><code>usteer/config</code></td>
+<td><code>syslog</code></td>
+<td>absent, <code>disabled</code> or an unknown word</td>
+</tr>
+<tr>
+<td><code>usteer/config</code></td>
+<td><code>ipv6</code>, <code>assoc_steering</code></td>
+<td><code>enabled</code></td>
+</tr>
+<tr>
+<td><code>dropbear/instances</code></td>
+<td><code>password_auth</code>, <code>root_password_auth</code>, <code>root_login</code></td>
+<td><code>disabled</code></td>
+</tr>
+<tr>
+<td><code>dropbear/instances</code></td>
+<td><code>gateway_ports</code></td>
+<td><code>enabled</code></td>
+</tr>
+<tr>
+<td><code>sqm/queues</code></td>
+<td><code>enabled</code></td>
+<td>absent, or a value other than <code>0</code>, <code>off</code>, <code>false</code> or <code>no</code> that the shell test <code>-eq 1</code> does not read as 1</td>
+</tr>
+<tr>
+<td><code>wireless/interfaces</code></td>
+<td><code>mode</code></td>
+<td>absent</td>
+</tr>
+<tr>
+<td><code>wireless/interfaces</code></td>
+<td><code>device</code>, <code>network</code></td>
+<td>not a list, which reads as an array of its words, such as <code>["radio0"]</code> for <code>radio0</code></td>
+</tr>
+<tr>
+<td><code>wireless/interfaces</code></td>
+<td><code>ssid</code></td>
+<td>a list, which reads as its JSON text, such as <code>[ "home", "net" ]</code></td>
+</tr>
+<tr>
+<td><code>wireless/interfaces</code></td>
+<td><code>nasid</code>, <code>mobility_domain</code>, <code>r1_key_holder</code></td>
+<td>a list, which reads as its entries joined by spaces</td>
+</tr>
+<tr>
+<td><code>mwan3/interfaces</code></td>
+<td><code>family</code></td>
+<td>absent, empty, or a list</td>
+</tr>
+<tr>
+<td><code>mwan3/rules</code></td>
+<td><code>family</code></td>
+<td>empty, which reads null, or a list, which reads as the string that <code>config_get</code> joins, such as <code>ipv4 ipv6</code></td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code>, <code>firewall/zones</code></td>
+<td><code>input</code>, <code>output_policy</code>, <code>forward</code></td>
+<td>a policy in another case or a prefix of one, such as <code>accept</code></td>
+</tr>
+<tr>
+<td><code>firewall/zones</code></td>
+<td><code>input</code>, <code>output_policy</code>, <code>forward</code></td>
+<td>absent</td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code></td>
+<td><code>synflood_rate</code></td>
+<td>any rate: a number, such as <code>25</code>, reads as the string <code>25/second</code> instead of an integer, and a rate with a unit, such as <code>25/s</code>, or after spaces or a <code>!</code>, reads with the whole unit instead of null</td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code></td>
+<td><code>synflood_burst</code></td>
+<td>a number that fw4 reads in another form, such as <code>0x10</code>, <code>16</code> or <code>1e3</code></td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code></td>
+<td><code>syn_flood</code></td>
+<td><code>synflood_protect</code>, which LuCI writes, is set, and <code>syn_flood</code> does not read the same value</td>
+</tr>
+<tr>
+<td><code>firewall/defaults</code></td>
+<td><code>drop_invalid</code>, <code>tcp_syncookies</code>, <code>flow_offloading</code>, <code>flow_offloading_hw</code>, and <code>syn_flood</code> for <code>synflood_protect</code> and <code>syn_flood</code></td>
+<td>a list, or a value other than <code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code>, <code>0</code>, <code>off</code>, <code>false</code> or <code>no</code>, which reads null instead of <code>false</code></td>
+</tr>
+<tr>
+<td><code>firewall/zones</code></td>
+<td><code>masq</code>, <code>mtu_fix</code></td>
+<td>a list, or a value other than <code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code>, <code>0</code>, <code>off</code>, <code>false</code> or <code>no</code>, which reads null instead of <code>false</code></td>
+</tr>
+<tr>
+<td><code>firewall/forwardings</code>, <code>firewall/rules</code>, <code>firewall/redirects</code>, <code>firewall/nat</code></td>
+<td><code>enabled</code></td>
+<td>a list, or a value other than <code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code>, <code>0</code>, <code>off</code>, <code>false</code> or <code>no</code>, which reads null instead of <code>true</code></td>
+</tr>
+<tr>
+<td><code>firewall/redirects</code></td>
+<td><code>reflection</code></td>
+<td>a list, or a value other than <code>1</code>, <code>on</code>, <code>true</code>, <code>yes</code>, <code>0</code>, <code>off</code>, <code>false</code> or <code>no</code>, which reads null instead of <code>true</code></td>
+</tr>
+<tr>
+<td><code>firewall/rules</code>, <code>firewall/nat</code>, <code>firewall/redirects</code></td>
+<td><code>target</code></td>
+<td>a target in another case or a prefix of one, or for nat and redirects a target that fw4 replaces with its default</td>
+</tr>
+<tr>
+<td><code>firewall/redirects</code></td>
+<td><code>reflection_src</code></td>
+<td>a choice in another case or a prefix of one</td>
+</tr>
+<tr>
+<td><code>firewall/zones</code>, <code>firewall/forwardings</code></td>
+<td><code>family</code></td>
+<td><code>all</code>, <code>*</code>, <code>inet</code>, or a word with 4 or 6</td>
+</tr>
+<tr>
+<td><code>firewall/rules</code>, <code>firewall/nat</code>, <code>firewall/redirects</code></td>
+<td><code>match.family</code></td>
+<td><code>all</code>, <code>*</code>, <code>inet</code>, or a word with 4 or 6</td>
+</tr>
+<tr>
+<td><code>firewall/rules</code></td>
+<td><code>match.src_port</code>, <code>match.dest_port</code></td>
+<td>one option of several words, as LuCI writes it</td>
+</tr>
+<tr>
+<td><code>firewall/rules</code>, <code>firewall/nat</code>, <code>firewall/redirects</code></td>
+<td><code>match.proto</code></td>
+<td>one option of several words</td>
+</tr>
+<tr>
+<td><code>uhttpd/instances</code></td>
+<td><code>listen_http</code>, <code>listen_https</code></td>
+<td>an option or an entry of several words</td>
+</tr>
+<tr>
+<td><code>network/routes</code></td>
+<td><code>type</code></td>
+<td>a number from 1 to 9, in decimal, hex or octal as strtoul reads it, such as <code>6</code> or <code>010</code></td>
+</tr>
+<tr>
+<td><code>network/interfaces</code></td>
+<td><code>disabled</code></td>
+<td><code>true</code>, which reads true: netifd <code>e97e36f</code> disables the interface for it, and the netifd of 25.12 did not</td>
+</tr>
+<tr>
+<td><code>network/interfaces</code></td>
+<td><code>listen_port</code></td>
+<td>a service name, such as <code>openvpn</code>, which reads null instead of its port from <code>/etc/services</code> or -1, or a number that ucode's <code>int()</code> reads in another way than 3.x, such as <code>0x10</code>, which reads 0, or <code>1194x</code>, which reads 1194, both -1 in 3.x</td>
+</tr>
+<tr>
+<td><code>sqm/queues</code></td>
+<td><code>download</code>, <code>upload</code>, <code>qdisc</code>, <code>linklayer</code>, <code>overhead</code></td>
+<td>absent, which reads the value of sqm-scripts instead of null</td>
+</tr>
+<tr>
+<td><code>dhcp/leases</code></td>
+<td><code>expires_at</code></td>
+<td>0 in the lease file of dnsmasq, for a v4 lease that does not expire, which reads null instead of 0</td>
+</tr>
+<tr>
+<td><code>dhcp/leases</code></td>
+<td><code>hostname</code></td>
+<td>on a v6 lease, a name with a byte other than a letter, a digit, <code>-</code>, <code>_</code> or <code>.</code>, which reads as the client sent it instead of as the lease file of odhcpd escapes it</td>
+</tr>
+</tbody>
+</table>
+<p><code>network/interfaces.listen_port</code> follows the wireguard handler of OpenWrt main.
+netifd parses no listen port, and the handler gives wg the number that ucode's
+<code>int()</code> reads from the stored value, so for a service name wg gets no port and
+listens on a port that the kernel picks. Such a name no longer reads -1, and a
+write of the interface, or a PATCH that switches it to wireguard, no longer
+answers 422 for it. A PUT of the read removes the name, with no change for wg. A
+stored number outside 0 to 65535 still reads -1 and blocks every write of the
+interface, since wg refuses the whole config for it. A PATCH that switches to
+wireguard over such a hidden number now also answers 422 when it sends null:
+send a port, or switch with a PUT, which removes it (#471).</p>
+<p>A section whose read changes gets a new ETag once, at the upgrade. A write that
+sends an <code>If-Match</code> from before the upgrade answers 412 <code>precondition_failed</code>.
+Read the section again and send its new ETag.</p>
+<p>A plan that sets one of these fields to its 3.x read shows a diff after the
+upgrade. Its apply writes that value, and the daemon then does what the 3.x read
+said, which it did not do before. Refresh the state and check each such diff
+before you apply. The sections above name the cases that matter most.</p>
+<p>For Terraform, a plan refreshes first. A field that the configuration does not
+set takes the new read, and the apply writes nothing for it, or sends the new
+read back in a PUT, which the server takes. Only a field that
+the configuration sets writes its value. So a Terraform user edits nothing for a
+read that changed, unless the configuration sets that field. A field that
+carries <code>x-uapi-clear-on-omit</code>, such as a policy of <code>firewall/zones</code>, is the
+exception: when the configuration does not set it, the apply removes the
+option that uci holds.</p>
+<p>The spec <code>default</code> of eight fields changes with the read: <code>system.log_remote</code> is
+<code>true</code>, <code>usteer/config.syslog</code> and <code>sqm/queues.enabled</code> are <code>false</code>,
+<code>mwan3/interfaces.family</code> is <code>ipv4</code>, and <code>wireless/interfaces.mode</code> and the
+<code>input</code>, <code>output_policy</code> and <code>forward</code> of <code>firewall/zones</code> have none. A client
+that sends the spec default for a field that its user left out now sends the
+new one.</p>
+<h2 id="a-query-parameter-value-outside-its-declared-set-answers-400">A query parameter value outside its declared set answers 400</h2>
+<p>3.x ignored a value that a query parameter does not declare. A <code>managed</code> other
+than <code>true</code> or <code>false</code> on a curated list listed every section, a <code>validate</code>
+other than <code>1</code> on <code>/uapi/diagnostics</code> skipped the sweep, and an empty <code>cursor</code>
+read the first page. v4 answers 400 <code>bad_request</code> for <code>managed</code> and <code>validate</code>,
+and 400 <code>invalid_cursor</code> for the empty cursor. Send only the values that the
+spec declares, and leave out a parameter instead of sending it empty.</p>
+<h2 id="a-cursor-that-ends-on-an-unmanaged-section-holds-a-hash">A cursor that ends on an unmanaged section holds a hash</h2>
+<p>The id of an anonymous section is its libuci name, which holds the position of
+the section in its package. After a delete of an earlier section, 3.x resumed
+the next page from the section that now has that name, and skipped one item
+without an error. v4 gives a page that ends on an unmanaged section the cursor
+<code>c_&lt;id&gt;.&lt;hash&gt;</code> and answers 400 <code>invalid_cursor</code> when an item up to that section
+changed. A cursor <code>c_&lt;id&gt;</code> of an unmanaged section, which 3.x gave or a client
+builds, answers 400 <code>invalid_cursor</code> too. Follow <code>X-Next-Cursor</code> or the <code>Link</code>
+as they come. After a 400 on a page after the first, read the list again from
+the first page.</p>
+<h2 id="a-delete-of-uhttpdinstancesmain-answers-422">A DELETE of <code>uhttpd/instances/main</code> answers 422</h2>
+<p>3.x refused a PUT or PATCH of <code>main</code> that removed uapi's own <code>ucode_prefix</code>
+entry, but a DELETE of <code>main</code> removed the section with the entry and answered
+204. The next request then got a 404 from uhttpd. v4 answers 422
+<code>validation_failed</code> with code <code>conflict</code> on <code>ucode_prefix</code> for a DELETE of
+<code>main</code> while it holds the entry, also in <code>/uapi/batch</code>, and deletes nothing. A
+DELETE of another instance, or of a <code>main</code> without the entry, works as before.
+A client that manages <code>main</code> and deletes it at teardown, as a Terraform destroy
+does, gets the 422. Remove <code>main</code> from its state instead.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="micro">
+      Rendered from <code>docs/migration-v3-to-v4.md</code> at tag <code>v4.0.0</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/migration-v3-to-v4.md">repository</a>, never here.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
