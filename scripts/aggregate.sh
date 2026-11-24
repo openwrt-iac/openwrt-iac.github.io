@@ -19,16 +19,20 @@ FEED_DIR="$STAGING_DIR/feed/packages/all/uapi"
 mkdir -p "$FEED_DIR"
 
 # Parse feed.yml with a tiny awk; the file is hand-maintained and the shape is
-# stable. Each `- repo:` line starts a record; the next `asset_pattern:` line
-# closes it. Output one record per line: `<repo>\t<asset_pattern>`.
+# stable. Each `- repo:` line starts a record, which holds an `asset_pattern:` line
+# and may hold an `extra_tags:` line. Output one record per line:
+# `<repo>\t<asset_pattern>\t<extra tags, space-separated>`.
 records=$(awk '
-  /^[[:space:]]*-[[:space:]]*repo:/ { sub(/.*repo:[[:space:]]*/, ""); repo=$0; next }
-  /^[[:space:]]*asset_pattern:/    { sub(/.*asset_pattern:[[:space:]]*/, ""); gsub(/^['"'"'"]|['"'"'"]$/, "", $0); print repo "\t" $0 }
+  function flush() { if (pattern != "") print repo "\t" pattern "\t" extra; repo = pattern = extra = "" }
+  /^[[:space:]]*-[[:space:]]*repo:/ { flush(); sub(/.*repo:[[:space:]]*/, ""); repo=$0; next }
+  /^[[:space:]]*asset_pattern:/    { sub(/.*asset_pattern:[[:space:]]*/, ""); gsub(/^['"'"'"]|['"'"'"]$/, "", $0); pattern=$0; next }
+  /^[[:space:]]*extra_tags:/       { sub(/.*extra_tags:[[:space:]]*/, ""); extra=$0; next }
+  END { flush() }
 ' feed.yml)
 
 [ -n "$records" ] || { echo "feed.yml: no sources"; exit 1; }
 
-printf '%s\n' "$records" | while IFS="	" read -r repo pattern; do
+printf '%s\n' "$records" | while IFS="	" read -r repo pattern extra; do
   [ -z "$repo" ] && continue
   echo "[aggregate] $repo  pattern=$pattern"
   # gh release list with --exclude-pre-releases filters at the source. If a
@@ -46,6 +50,17 @@ printf '%s\n' "$records" | while IFS="	" read -r repo pattern; do
   echo "[aggregate]   latest tag: $latest"
   gh release download "$latest" --repo "$repo" --pattern "$pattern" \
     --dir "$FEED_DIR" --clobber 2>&1 | sed 's/^/[aggregate]   /'
+  # An extra tag keeps an older major installable where the Latest one is not. It must be
+  # published and stable, as the Latest one is, and a wrong tag stops the run instead of
+  # quietly dropping a package that routers depend on.
+  for tag in $extra; do
+    stable=$(gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease \
+             --jq 'if .isDraft or .isPrerelease then "" else "yes" end' 2>/dev/null || true)
+    [ "$stable" = yes ] || { echo "[aggregate]   $tag is not a published stable release of $repo"; exit 1; }
+    echo "[aggregate]   extra tag: $tag"
+    gh release download "$tag" --repo "$repo" --pattern "$pattern" \
+      --dir "$FEED_DIR" --clobber 2>&1 | sed 's/^/[aggregate]   /'
+  done
 done
 
 # Sign the index against everything in FEED_DIR.

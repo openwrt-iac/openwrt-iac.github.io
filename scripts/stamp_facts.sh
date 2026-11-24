@@ -33,7 +33,7 @@ apk_pin=$(printf '%s' "$asset" | sed -n 's/^uapi-\(.*\)\.apk$/\1/p')
 
 # The version picker. One entry per major's latest stable, newest first: that is the set an
 # operator might actually want, and the install steps differ between them because the feed
-# carries only the newest. Each entry's prefix comes from that tag's own spec rather than being
+# carries the newest and only the older ones that feed.yml lists in `extra_tags`. Each entry's prefix comes from that tag's own spec rather than being
 # inferred from its major number.
 versions_json=$(python3 scripts/list_versions.py)
 [ -n "$versions_json" ] || { echo "[facts] version list came out empty" >&2; exit 1; }

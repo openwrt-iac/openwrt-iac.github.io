@@ -40,6 +40,8 @@ Requirements on the source repo:
 - Each `v*` tag attaches the built APK as a release asset matching `asset_pattern`.
 - Prerelease tags (anything containing a hyphen, e.g. `v1.0.0-rc1`) are marked `--prerelease` on the GitHub Release. The aggregator filters with `gh release list --exclude-pre-releases`; nothing further is required.
 
+The feed serves the release that GitHub marks Latest. To keep an older major installable where the Latest one cannot install, list its tag in `extra_tags` (space-separated). The aggregator stops if a listed tag is not a published stable release. apk-tools does not fall back to an older version on its own, so the operator needs a version constraint such as `apk add 'uapi<4'`.
+
 After merge, the next nightly run (or a manual `gh workflow run publish.yml --repo openwrt-iac/openwrt-iac.github.io`) picks up the new package's latest stable release and republishes the feed index.
 
 If your new package is substantial enough to warrant a project page (and it usually is, otherwise consider whether it belongs in this org), add a `web/<package>/index.html` mirroring the `web/uapi/` shape and link it from `web/index.html`'s "projects" section.
@@ -47,14 +49,16 @@ If your new package is substantial enough to warrant a project page (and it usua
 ## Operator install
 
 ```
-curl -fsSL https://openwrt-iac.github.io/feed/uapi-feed.pub.pem \
-    | tee /etc/apk/keys/uapi-feed.pub.pem > /dev/null
+uclient-fetch -qO /etc/apk/keys/uapi-feed.pub.pem \
+    https://openwrt-iac.github.io/feed/uapi-feed.pub.pem
 echo 'https://openwrt-iac.github.io/feed/packages/all/uapi/packages.adb' \
     > /etc/apk/repositories.d/uapi.list
 apk update
 apk add uapi
 apk add unbound-uci-ext   # or any other package this feed hosts
 ```
+
+uapi 4.x needs a netifd that OpenWrt 25.12 does not ship. On 25.12, install 3.5.0 with `apk add 'uapi<4'` in place of `apk add uapi`. The same command, run once, also lets `apk upgrade` work again on a 25.12 router that runs 3.x from the feed.
 
 ## Trust model
 
