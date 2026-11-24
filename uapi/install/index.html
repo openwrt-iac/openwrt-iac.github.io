@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Install uapi - signed APK feed</title>
-<meta name="description" content="Install uapi from the signed APK feed for OpenWrt 25.12+.">
+<meta name="description" content="Install uapi from the signed APK feed for OpenWrt.">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -15,7 +15,9 @@
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> / install</p>
     <h1>Install uapi</h1>
     <p class="lede">
-      The signed APK feed for OpenWrt 25.12+. Run these on your router as root.
+      The signed APK feed for OpenWrt. The newest release runs on OpenWrt main and the
+      next release cut from it. On OpenWrt 25.12, pick 3.5.0 in the list. Run these on your
+      router as root.
     </p>
   </div>
 </header>
@@ -25,7 +27,7 @@
     <h2>Three steps</h2>
     <div class="version-picker">
   <label for="uapi-version">Version to install</label>
-  <select id="uapi-version"><option value="4.0.1" selected>4.0.1 (current)</option><option value="3.5.0">3.5.0</option><option value="2.5.1">2.5.1</option><option value="1.2.1">1.2.1</option></select>
+  <select id="uapi-version"><option value="4.0.1" selected>4.0.1 (current)</option><option value="3.5.0">3.5.0 (also in the feed)</option><option value="2.5.1">2.5.1</option><option value="1.2.1">1.2.1</option></select>
 </div>
 <script>
   document.getElementById("uapi-version").addEventListener("change", function (e) {
@@ -39,8 +41,8 @@
     <ol>
       <li>
         <strong>Trust the feed signing key</strong>
-<pre><code>curl -fsSL https://openwrt-iac.github.io/feed/uapi-feed.pub.pem \
-    | tee /etc/apk/keys/uapi-feed.pub.pem &gt; /dev/null</code></pre>
+<pre><code>uclient-fetch -qO /etc/apk/keys/uapi-feed.pub.pem \
+    https://openwrt-iac.github.io/feed/uapi-feed.pub.pem</code></pre>
       </li>
 
       <li>
@@ -66,18 +68,27 @@ apk update</code></pre>
     <div class="version-steps" data-version="3.5.0" hidden>
   <ol>
     <li>
-      <strong>Download the release</strong>
-<pre><code>wget https://github.com/openwrt-iac/uapi/releases/download/v3.5.0/uapi-3.5.0-r1.apk \
-     -O /tmp/uapi-3.5.0.apk</code></pre>
+      <strong>Trust the feed signing key</strong>
+<pre><code>uclient-fetch -qO /etc/apk/keys/uapi-feed.pub.pem \
+    https://openwrt-iac.github.io/feed/uapi-feed.pub.pem</code></pre>
     </li>
     <li>
-      <strong>Install it</strong>
-<pre><code>apk add --allow-untrusted /tmp/uapi-3.5.0.apk</code></pre>
+      <strong>Add the feed</strong>
+<pre><code>echo 'https://openwrt-iac.github.io/feed/packages/all/uapi/packages.adb' \
+    &gt; /etc/apk/repositories.d/uapi.list
+apk update</code></pre>
+    </li>
+    <li>
+      <strong>Install</strong>
+<pre><code>apk add 'uapi&lt;4'</code></pre>
     </li>
   </ol>
   <p class="micro">
-    The feed serves the current release only, so this one comes from its GitHub
-    Release and needs no signing key or repository entry. It serves its API under
+    The feed serves this release beside 4.0.1, for routers that 4.0.1 does not
+    support. apk does not fall back to it on its own, so the version constraint picks it. The
+    constraint stays in <code>/etc/apk/world</code>, and <code>apk upgrade</code> then keeps
+    this major. A router that already runs it from the feed needs the same command once, or
+    <code>apk upgrade</code> fails on 4.0.1. It serves its API under
     <code>/api/v3</code>, not <code>/api/v4</code>.
   </p>
 </div>
