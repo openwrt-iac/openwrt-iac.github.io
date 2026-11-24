@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ucode quirks that have bitten this project - uapi 4.0.0 docs</title>
+<title>ucode quirks that have bitten this project - uapi 4.0.1 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 4.0.0 / ucode quirks that have bitten this project</p>
+       <a href="/uapi/docs/">docs</a> / 4.0.1 / ucode quirks that have bitten this project</p>
   </div>
 </header>
 
@@ -87,6 +87,25 @@ as <code>{ "k": 1 }</code>. <code>main.uc</code> therefore refuses the NUL escap
 (<code>values.json_has_nul</code>) before any handler runs. <code>replace()</code> with a regex stops
 there too: <code>replace("AB\u0000 CD", /[[:space:]]/g, "")</code> returns <code>AB</code>. <code>wg.uc</code>
 relies on it to end a line of a WireGuard config at a NUL byte, as wg does.</p>
+<h3 id="a-pattern-without-the-s-flag-matches-each-line-on-openwrt-main">A pattern without the <code>s</code> flag matches each line on OpenWrt main</h3>
+<p>ucode 8a8b4d12a8 ("types: fix regexp <code>/.../s</code> flag inversion", 2026-03-20)
+swapped the meaning of the <code>s</code> flag. Since then, and so on OpenWrt main, a regex
+literal or a <code>regexp()</code> without <code>s</code> compiles with POSIX <code>REG_NEWLINE</code>: <code>^</code> also
+matches after a newline, <code>$</code> also matches before one, and <code>.</code> and a bracket
+expression that starts with <code>^</code> match no newline. With <code>s</code>, the anchors cover
+the whole string and <code>.</code> matches a newline. Older builds do the reverse: OpenWrt
+25.12 (ucode 2026.01.16), and ucode 0.0.20250529, which Alpine 3.24 ships and
+the unit job of CI runs.</p>
+<p>On OpenWrt main, <code>match("abc\nxyz", /^[a-z]+$/)</code> therefore returns <code>[ "abc" ]</code>:
+an anchored check of a whole value passes when one line of the value passes. A
+value without a newline matches alike on both builds, so <code>values.whole_match(s,
+re)</code> takes only such a value, and each check of a name, an id, a key or a number
+that must hold for the whole value goes through it. <code>main.uc</code> also refuses a
+newline or a carriage return in the path, in the query and in the headers that
+it reads, before any handler runs, and counts the <code>{</code> and <code>[</code> of a body after it
+drops the newlines. The <code>s</code> flag is no fix: its meaning depends on the build,
+and the unit job runs the older one. To see on a unit host what OpenWrt main
+does with <code>/X/</code>, run <code>/X/s</code>, and the reverse.</p>
 <h3 id="const-is-real"><code>const</code> is real</h3>
 <p><code>const X = ...</code> is parsed and enforced. Top-level data tables in this repo are
 mostly <code>const</code>.</p>
@@ -420,8 +439,8 @@ it first." The list grows; that's how it pays off.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v4.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/ucode-quirks.md">repository</a>, never here.
+      Rendered from <code>docs/ucode-quirks.md</code> at tag <code>v4.0.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.1/docs/ucode-quirks.md">repository</a>, never here.
     </p>
   </div>
 </footer>

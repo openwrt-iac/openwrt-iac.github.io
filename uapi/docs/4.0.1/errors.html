@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Errors - uapi 4.0.0 docs</title>
+<title>Errors - uapi 4.0.1 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 4.0.0 / Errors</p>
+       <a href="/uapi/docs/">docs</a> / 4.0.1 / Errors</p>
   </div>
 </header>
 
@@ -46,7 +46,8 @@ Errors always carry the envelope below.</p>
   request server-side. Clients may supply their own via <code>X-Request-Id</code> header or
   <code>?request_id=</code> query param, each validated against <code>^[A-Za-z0-9_-]{8,128}$</code>.
   The header wins when it matches. When neither form matches, the server
-  generates a ULID.</li>
+  generates a ULID. A request whose <code>X-Request-Id</code> or <code>?request_id=</code> holds a
+  newline or a carriage return answers <code>400 bad_request</code> under a ULID.</li>
 <li><code>errors[]</code> is only present for <code>422 validation_failed</code>. <strong>All</strong> field errors
   are reported together so the client can fix everything in one round trip.</li>
 </ul>
@@ -63,7 +64,7 @@ Errors always carry the envelope below.</p>
 <tr>
 <td>400</td>
 <td><code>bad_request</code></td>
-<td>Malformed JSON, wrong shape, body where none expected, a query parameter value that the endpoint does not declare (a <code>limit</code> outside 1 to 500, a <code>family</code> other than <code>v4</code> or <code>v6</code> on <code>dhcp/leases</code>, a <code>managed</code> other than <code>true</code> or <code>false</code> on a curated list, a <code>validate</code> other than <code>1</code> on <code>/uapi/diagnostics</code>), an <code>Idempotency-Key</code> on a POST that does not match <code>^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$</code>, no body on a PUT/PATCH, a key or string with a NUL or a control character other than tab, newline and carriage return, which uci cannot store, or the body of a POST, PUT or PATCH that has not arrived in full 10 s after the start of the request, which is checked before the bearer check</td>
+<td>Malformed JSON, wrong shape, body where none expected, a query parameter value that the endpoint does not declare (a <code>limit</code> outside 1 to 500, a <code>family</code> other than <code>v4</code> or <code>v6</code> on <code>dhcp/leases</code>, a <code>managed</code> other than <code>true</code> or <code>false</code> on a curated list, a <code>validate</code> other than <code>1</code> on <code>/uapi/diagnostics</code>), an <code>Idempotency-Key</code> on a POST that does not match <code>^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$</code>, no body on a PUT/PATCH, a newline or a carriage return in the path, in the name or the value of a query parameter, or in a request header that uapi reads (<code>Authorization</code>, <code>Content-Type</code>, <code>Content-Length</code>, <code>Transfer-Encoding</code>, <code>If-Match</code>, <code>If-None-Match</code>, <code>Idempotency-Key</code>, <code>X-Request-Id</code>), which is checked before the bearer check, a key or string with a NUL or a control character other than tab, newline and carriage return, which uci cannot store, or the body of a POST, PUT or PATCH that has not arrived in full 10 s after the start of the request, which is checked before the bearer check</td>
 </tr>
 <tr>
 <td>400</td>
@@ -489,8 +490,8 @@ possibly restore) and is typically well under a second.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/errors.md</code> at tag <code>v4.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/errors.md">repository</a>, never here.
+      Rendered from <code>docs/errors.md</code> at tag <code>v4.0.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.1/docs/errors.md">repository</a>, never here.
     </p>
   </div>
 </footer>

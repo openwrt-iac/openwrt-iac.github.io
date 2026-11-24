@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>uapi security model - uapi 4.0.0 docs</title>
+<title>uapi security model - uapi 4.0.1 docs</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div class="container">
     <div class="brand"><a href="/uapi/" style="color:inherit;border:none;">uapi</a></div>
     <p class="crumb"><a href="/">openwrt-iac</a> / <a href="/uapi/">uapi</a> /
-       <a href="/uapi/docs/">docs</a> / 4.0.0 / uapi security model</p>
+       <a href="/uapi/docs/">docs</a> / 4.0.1 / uapi security model</p>
   </div>
 </header>
 
@@ -54,10 +54,12 @@
 <li><strong>Shell metacharacter injection.</strong> Every shell-invoked path (apk install,
    init-script reload) validates names against
    <code>^[A-Za-z0-9_-]+$</code> (or <code>^[A-Za-z0-9_+][A-Za-z0-9_+.-]*$</code> for packages)
-   before interpolating, and uses <code>--</code> to separate flags from positional
-   arguments. Service names from ucitrack are validated before
-   interpolating into <code>/etc/init.d/&lt;svc&gt;</code>. The WireGuard apply path in
-   <code>src/lib/wg.uc</code> builds each <code>wg</code> and <code>ip</code> command as an argument list,
+   over the whole value, through <code>values.whole_match</code> (see
+   <a href="ucode-quirks.html">ucode quirks</a>), before interpolating, and uses <code>--</code> to
+   separate flags from positional arguments. Service names from ucitrack are
+   validated before interpolating into <code>/etc/init.d/&lt;svc&gt;</code>. The WireGuard
+   apply path in <code>src/lib/wg.uc</code> builds each <code>wg</code> and <code>ip</code> command as an
+   argument list,
    and one function quotes every argument with <code>shellquote</code>, because the
    restore after a failed write reads peers straight from uci, where a
    value never passed <code>validate()</code>. wg.uc also checks the values before it
@@ -370,8 +372,8 @@ are recorded choices rather than defects.</p>
 <footer>
   <div class="container">
     <p class="micro">
-      Rendered from <code>docs/security.md</code> at tag <code>v4.0.0</code>. Edits go to the
-      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.0/docs/security.md">repository</a>, never here.
+      Rendered from <code>docs/security.md</code> at tag <code>v4.0.1</code>. Edits go to the
+      <a href="https://github.com/openwrt-iac/uapi/blob/v4.0.1/docs/security.md">repository</a>, never here.
     </p>
   </div>
 </footer>
