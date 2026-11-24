@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>uapi - native HTTP REST API for OpenWrt</title>
-<meta name="description" content="uapi is a zero-footprint HTTP REST API for OpenWrt 25.12+. Translates standard REST verbs into ubus calls so modern edge routers become first-class targets for Infrastructure-as-Code workflows.">
+<meta name="description" content="uapi is a zero-footprint HTTP REST API for OpenWrt. Translates standard REST verbs into ubus calls so modern edge routers become first-class targets for Infrastructure-as-Code workflows.">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -15,7 +15,7 @@
     <p class="crumb"><a href="/">openwrt-iac</a> / uapi</p>
     <h1>The OpenWrt REST API</h1>
     <p class="lede">
-      A native, zero-footprint HTTP control plane for OpenWrt 25.12+.
+      A native, zero-footprint HTTP control plane for OpenWrt.
       Translates standard REST verbs into ubus calls so modern edge routers
       become first-class targets for Infrastructure-as-Code.
     </p>
@@ -26,7 +26,7 @@
       <a class="btn" href="https://github.com/openwrt-iac/uapi">View on GitHub</a>
     </div>
     <p class="micro">
-      v{{UAPI_VERSION}} - signed APK feed - MIT licensed - OpenWrt 25.12 +
+      v{{UAPI_VERSION}} - signed APK feed - MIT licensed - OpenWrt main, 3.5.0 on 25.12
     </p>
   </div>
 </header>
@@ -122,7 +122,7 @@ resource "uapi_firewall_rule" "ssh_mgmt" {
     <h2>Quickstart (raw HTTP)</h2>
     <ol>
       <li>
-        <strong>Install</strong> from the signed APK feed (full guide at <a href="/uapi/install/">/uapi/install/</a>):
+        <strong>Install</strong> from the signed APK feed (full guide, and the OpenWrt 25.12 command, at <a href="/uapi/install/">/uapi/install/</a>):
 <pre><code>apk add uapi</code></pre>
       </li>
       <li>
